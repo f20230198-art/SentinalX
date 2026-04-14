@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.env
+*.egg-info/
+.pytest_cache/
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Node / frontend
+node_modules/
+dist/
+build/
+.vite/
+*.local
+
+# Tor keys & hidden service state (NEVER commit these)
+tor_config/hidden_service/
+*.key
+hostname
+
+# Model cache / data dumps (too big for git)
+data/models/
+data/mitre/*.json
+data/mitre/*.npy
+
+# Editors
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# PDF outputs
+*.pdf
+!docs/**/*.pdf
