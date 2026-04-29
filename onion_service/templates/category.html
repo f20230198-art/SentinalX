@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}DarkBay :: {{ category }}{% endblock %}
+{% block content %}
+<section class="hero">
+    <h1>{{ category }}</h1>
+    <p class="hero-sub">{{ threads|length }} thread(s) in this board.</p>
+</section>
+
+{% if threads %}
+<table class="threadlist">
+    <thead><tr><th>Title</th><th>Author</th><th>Posts</th><th>Created</th></tr></thead>
+    <tbody>
+    {% for t in threads %}
+        <tr>
+            <td><a href="{{ url_for('thread', thread_id=t['id']) }}">{{ t['title'] }}</a></td>
+            <td class="user">{{ t['author'] }}</td>
+            <td>{{ t['post_count'] }}</td>
+            <td class="ts">{{ t['created_at'] | fmt_ts }}</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p class="empty">no threads yet in <code>{{ category }}</code>.</p>
+{% endif %}
+{% endblock %}

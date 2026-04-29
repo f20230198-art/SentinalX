@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>{% block title %}DarkBay :: Underground Marketplace{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+    <div class="brand">
+        <a href="{{ url_for('index') }}">DarkBay</a>
+        <span class="tagline">// trusted underground since '17</span>
+    </div>
+    <nav class="topnav">
+        <a href="{{ url_for('category', slug='marketplace') }}">marketplace</a>
+        <a href="{{ url_for('category', slug='credentials') }}">credentials</a>
+        <a href="{{ url_for('category', slug='access') }}">access</a>
+        <a href="{{ url_for('category', slug='vulnerabilities') }}">vulnerabilities</a>
+        <a href="{{ url_for('category', slug='general') }}">general</a>
+    </nav>
+</header>
+
+<main class="content">
+    {% block content %}{% endblock %}
+</main>
+
+<footer class="footer">
+    <small>DarkBay :: posts are buyer-beware :: tor only :: no logs</small>
+</footer>
+</body>
+</html>

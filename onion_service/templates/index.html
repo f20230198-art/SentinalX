@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}DarkBay :: Recent Threads{% endblock %}
+{% block content %}
+<section class="hero">
+    <h1>Recent Threads</h1>
+    <p class="hero-sub">latest chatter across all boards. tread carefully.</p>
+</section>
+
+<section class="cat-summary">
+    {% for c in categories %}
+        <a class="cat-pill" href="{{ url_for('category', slug=c['category']) }}">
+            {{ c['category'] }} <span class="cat-count">{{ c['n'] }}</span>
+        </a>
+    {% endfor %}
+</section>
+
+<table class="threadlist">
+    <thead>
+    <tr><th>Title</th><th>Category</th><th>Author</th><th>Posts</th><th>Last activity</th></tr>
+    </thead>
+    <tbody>
+    {% for t in threads %}
+        <tr>
+            <td><a href="{{ url_for('thread', thread_id=t['id']) }}">{{ t['title'] }}</a></td>
+            <td><span class="tag tag-{{ t['category'] }}">{{ t['category'] }}</span></td>
+            <td class="user">{{ t['author'] }}</td>
+            <td>{{ t['post_count'] }}</td>
+            <td class="ts">{{ (t['last_post_at'] or t['created_at']) | fmt_ts }}</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

@@ -1,0 +1,30 @@
+# Tor daemon config for the SentinelX synthetic darknet forum.
+#
+# What this file does:
+#   1. Runs a SOCKS5 proxy on 0.0.0.0:9050 so other containers (notably the
+#      future scraper) can route HTTP traffic through Tor.
+#   2. Publishes a v3 hidden service that forwards traffic from port 80 on the
+#      .onion address to the Flask forum container at forum:5000 inside the
+#      docker-compose network.
+#   3. Stores the hidden service's keypair + hostname under
+#      /var/lib/tor/sentinelx_forum/ — this dir is bind-mounted to ./tor_config/
+#      hidden_service on the host, so the .onion address is stable across
+#      container rebuilds.
+
+# --- SOCKS5 proxy (used by the scraper to make .onion HTTP requests) ---
+SOCKSPort 0.0.0.0:9050
+SOCKSPolicy accept *
+
+# --- Logging (stdout so `docker logs` works) ---
+Log notice stdout
+
+# --- Data dir for relay keys, cached descriptors, etc. ---
+DataDirectory /var/lib/tor
+
+# --- Hidden service for the forum ---
+HiddenServiceDir /var/lib/tor/sentinelx_forum/
+HiddenServiceVersion 3
+HiddenServicePort 80 forum:5000
+
+# We are not running as a relay; only as a client + onion service publisher.
+ClientOnly 1

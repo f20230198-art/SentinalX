@@ -1,0 +1,127 @@
+/* DarkBay — minimal phpBB-circa-2005 darknet aesthetic.
+   Monospace, green-on-black, hard edges. Intentionally ugly. */
+
+:root {
+    --bg: #0b0f0c;
+    --bg-alt: #111713;
+    --bg-hover: #182019;
+    --fg: #c8d4cc;
+    --fg-dim: #8a9a91;
+    --accent: #6cff9d;
+    --accent-dim: #3fbb6d;
+    --warn: #ffb86b;
+    --bad: #ff6b6b;
+    --border: #1f2a23;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "Consolas", "Menlo", "DejaVu Sans Mono", monospace;
+    font-size: 14px;
+    line-height: 1.45;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; color: var(--accent-dim); }
+
+.topbar {
+    background: var(--bg-alt);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 24px;
+    display: flex; align-items: baseline; gap: 24px;
+}
+.brand a { font-weight: bold; font-size: 18px; color: var(--accent); }
+.brand .tagline { color: var(--fg-dim); margin-left: 8px; font-size: 12px; }
+.topnav { display: flex; gap: 16px; }
+.topnav a { color: var(--fg); }
+.topnav a:hover { color: var(--accent); }
+
+.content { padding: 24px; max-width: 1100px; margin: 0 auto; }
+
+.hero h1 { margin: 0 0 4px 0; color: var(--accent); font-size: 22px; }
+.hero-sub { margin: 0 0 18px 0; color: var(--fg-dim); }
+
+.cat-summary { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+.cat-pill {
+    background: var(--bg-alt);
+    border: 1px solid var(--border);
+    padding: 4px 10px;
+    border-radius: 2px;
+    font-size: 12px;
+    color: var(--fg);
+}
+.cat-pill:hover { background: var(--bg-hover); }
+.cat-count { color: var(--fg-dim); margin-left: 4px; }
+
+table.threadlist {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--bg-alt);
+    border: 1px solid var(--border);
+    font-size: 13px;
+}
+table.threadlist th,
+table.threadlist td {
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+}
+table.threadlist th {
+    background: #0e140f;
+    color: var(--fg-dim);
+    font-weight: normal;
+    text-transform: uppercase;
+    font-size: 11px;
+    letter-spacing: 0.5px;
+}
+table.threadlist tr:hover td { background: var(--bg-hover); }
+
+.tag {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 2px;
+    font-size: 11px;
+    background: #1a2620;
+    color: var(--fg);
+    border: 1px solid var(--border);
+}
+.tag-marketplace { color: var(--warn); border-color: #3a2c14; }
+.tag-credentials { color: #ff8ad6; border-color: #3a1a2c; }
+.tag-access { color: var(--bad); border-color: #3a1414; }
+.tag-vulnerabilities { color: #6bb6ff; border-color: #14263a; }
+.tag-general { color: var(--fg-dim); }
+
+.user { color: var(--accent-dim); }
+.ts { color: var(--fg-dim); font-size: 12px; }
+
+.posts { display: flex; flex-direction: column; gap: 12px; }
+.post {
+    background: var(--bg-alt);
+    border: 1px solid var(--border);
+    padding: 12px 14px;
+}
+.post-head {
+    display: flex; gap: 12px; align-items: baseline;
+    border-bottom: 1px dashed var(--border);
+    padding-bottom: 6px; margin-bottom: 8px;
+    font-size: 12px;
+}
+.permalink { margin-left: auto; color: var(--fg-dim); }
+.post-body {
+    margin: 0; white-space: pre-wrap; word-wrap: break-word;
+    font-family: inherit; color: var(--fg);
+}
+
+.empty { color: var(--fg-dim); font-style: italic; }
+
+.footer {
+    text-align: center;
+    padding: 18px;
+    color: var(--fg-dim);
+    border-top: 1px solid var(--border);
+    margin-top: 40px;
+}

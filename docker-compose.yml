@@ -1,0 +1,53 @@
+# SentinelX -- Stage 1 compose stack.
+#
+# Two services:
+#   forum  -> Flask synthetic darknet forum (seeded on first boot)
+#   tor    -> Tor daemon: publishes the forum as a v3 .onion AND exposes a
+#             SOCKS5 proxy on the host at 127.0.0.1:9050 so later stages
+#             (the scraper) can hit the .onion through it.
+#
+# Volumes:
+#   forum_data        persists /data/forum.db across forum container restarts
+#   ./tor_config/hidden_service  bind mount that holds the hidden service
+#                                keypair + 'hostname' file. Keeping it on disk
+#                                means the .onion address stays the same every
+#                                time you `docker compose up`. Read it with:
+#                                cat tor_config/hidden_service/hostname
+
+services:
+  forum:
+    build:
+      context: ./onion_service
+      dockerfile: Dockerfile
+    container_name: sentinelx-forum
+    restart: unless-stopped
+    expose:
+      - "5000"        # only reachable inside the compose network (via tor)
+    volumes:
+      - forum_data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/healthz', timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  tor:
+    build:
+      context: ./tor_config
+      dockerfile: Dockerfile
+    container_name: sentinelx-tor
+    restart: unless-stopped
+    depends_on:
+      forum:
+        condition: service_healthy
+    ports:
+      # Expose SOCKS5 to host so future scraper (running on host or another
+      # container) can route through this Tor instance.
+      - "127.0.0.1:9050:9050"
+    volumes:
+      # Persist the .onion keypair so the address is stable across rebuilds.
+      - ./tor_config/hidden_service:/var/lib/tor/sentinelx_forum
+
+volumes:
+  forum_data:

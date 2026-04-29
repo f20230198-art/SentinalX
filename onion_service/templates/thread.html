@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}DarkBay :: {{ thread['title'] }}{% endblock %}
+{% block content %}
+<section class="hero">
+    <h1>{{ thread['title'] }}</h1>
+    <p class="hero-sub">
+        in <a href="{{ url_for('category', slug=thread['category']) }}">{{ thread['category'] }}</a>
+        :: started by <span class="user">{{ thread['author'] }}</span>
+        :: {{ thread['created_at'] | fmt_ts }}
+    </p>
+</section>
+
+<div class="posts">
+    {% for p in posts %}
+    <article class="post" id="post-{{ p['id'] }}">
+        <header class="post-head">
+            <span class="user">{{ p['author'] }}</span>
+            <span class="ts">{{ p['created_at'] | fmt_ts }}</span>
+            <a class="permalink" href="#post-{{ p['id'] }}">#{{ p['id'] }}</a>
+        </header>
+        <pre class="post-body">{{ p['body'] }}</pre>
+    </article>
+    {% endfor %}
+</div>
+{% endblock %}
