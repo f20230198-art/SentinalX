@@ -1,38 +1,52 @@
-# STAGE 03 — LEARN
+# STAGE 03 — NER + IOC Extraction (spaCy + Regex)
 
-> **Stage 3 in one sentence:** read the immutable `raw_posts` rows that Stage 2 lands, pull *Indicators of Compromise* (IPs, hashes, CVEs, BTC addresses, etc.) out of them with regex over a defanged-then-refanged copy of the text, pull *named entities* (orgs, people, malware families, threat actors) out with spaCy plus a curated keyword pass, and persist both to dedicated tables — incrementally, so each run only processes what's new.
-
-This document is the standalone teaching pass for Stage 3. It assumes you've read `STAGE_02_LEARN.md` (or at least know that Stage 2 publishes immutable rows in `raw_posts` with a stable `id` autoincrement key).
+> **Read this on your own time.** Companion to the code shipped in Stage 3. Same voice as Stages 1–2: full depth, jargon unpacked inline, optional **Detour** and **Try this** boxes.
 
 ---
 
-## 0. Mental model — what is an "extraction" stage actually doing?
+## Quick orientation: what does Stage 3 do, in one paragraph?
 
-In a real CTI pipeline the **collection layer** (Stage 2) is dumb on purpose: pull bytes from sources, get them onto disk, don't try to interpret. The **extraction layer** (Stage 3) is the first interpretive pass. Its job is to turn a wall of unstructured prose into *structured facts* downstream stages can reason about.
+Stage 2 dumped raw forum posts into a `raw_posts` table — just walls of text. Stage 3 is the **first interpretive layer**: it reads each post and pulls out two kinds of structured facts.
+
+1. **IOCs (Indicators of Compromise)** — IPs, domains, CVEs, file hashes, BTC wallet addresses, emails, URLs. Found via regular expressions over a "cleaned-up" (refanged) copy of the post text.
+2. **Named entities** — people, organisations, places, products, plus malware family names and threat actor names. Found using spaCy (an off-the-shelf Python NLP library) plus a hand-curated keyword pass.
+
+Both kinds of facts get written to dedicated tables (`iocs`, `entities`) keyed by `raw_post_id`. The whole stage is incremental — it only processes posts it hasn't seen yet, and re-running it doesn't create duplicates.
+
+That's the whole stage. ~250 lines of Python.
+
+---
+
+## 0. The mental model: what's an extraction layer for?
+
+In a real CTI pipeline, the **collection layer** (Stage 2) is dumb on purpose. Its only job is "pull bytes from outside, get them onto disk, don't try to interpret anything." The **extraction layer** (Stage 3) is the first place where we actually *try to understand* what's in those bytes.
 
 Two kinds of facts come out:
 
-| Class               | Examples                                                     | Why CTI cares                                                              |
-|---------------------|--------------------------------------------------------------|----------------------------------------------------------------------------|
-| **IOCs** (indicators)| `185.220.101.42`, `CVE-2024-12345`, `bc1q…`, `evil.com`, `a3f5…` (sha256) | These are pivotable atoms. An analyst sees an IP in your store, looks up where else it has appeared, blocks it at the perimeter, hunts for it in EDR. |
-| **Named entities** | `Lazarus Group`, `Cobalt Strike`, `Microsoft`, `Ukraine`     | These are *who/what/where*. They give context to a post — actor attribution, tooling, victim industry. They also feed the MITRE mapping in Stage 5. |
+| Class                 | Examples                                                            | Why CTI cares                                                                                                                          |
+|-----------------------|---------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------|
+| **IOCs (indicators)** | `185.220.101.42`, `CVE-2024-12345`, `bc1q…` (BTC), `evil.com`, `a3f5…` (sha256) | These are **pivot atoms**. An analyst sees an IP in your store → looks up where else it has appeared → blocks it at the firewall → hunts for it in EDR logs. The whole game is jumping from one IOC to another. |
+| **Named entities**    | `Lazarus Group`, `Cobalt Strike`, `Microsoft`, `Ukraine`            | These are *who / what / where*. They give context to a post — actor attribution, tooling used, the victim industry. They'll also feed Stage 5's MITRE ATT&CK mapping. |
 
-Everything an extraction stage does is shaped by four pressures, and Stage 3 addresses each:
+Every extraction stage in real CTI deals with the same four pressures, and Stage 3 addresses each one:
 
-| Pressure                                      | Why it matters                                                                | How Stage 3 handles it                                                                  |
-|-----------------------------------------------|-------------------------------------------------------------------------------|------------------------------------------------------------------------------------------|
-| **Defanged input**                            | Threat reports write `1.2.3[.]4` and `hxxps://` so URLs don't auto-resolve.   | A `refang()` pass turns defanged forms back into matchable strings before regex runs.    |
-| **Overlapping patterns**                      | A 64-hex string is sha256, not three md5s. A domain inside a URL is not a separate domain. | Match longest/most-specific first, record consumed spans, skip overlaps for shorter patterns. |
-| **NER models miss CTI vocabulary**            | spaCy has never heard of "Lazarus Group" or "Cobalt Strike."                  | spaCy for the generic labels, a curated keyword pass for `MALWARE` and `THREAT_ACTOR`.  |
-| **Idempotency under reruns**                  | You will re-run extraction. Outputs must be stable — no duplicate rows.       | `UNIQUE(raw_post_id, ioc_type, value)` and `UNIQUE(raw_post_id, label, text)` at the DB layer; `dedupe()` at the Python layer to avoid wasted IntegrityErrors. |
+| Pressure                                  | Why it matters                                                                              | How Stage 3 handles it                                                                                                  |
+|-------------------------------------------|---------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------|
+| **Defanged input**                        | Threat reports write `1.2.3[.]4` and `hxxps://evil.com` so URLs aren't clickable.           | A `refang()` pass turns these back into normal strings before regex runs.                                                |
+| **Overlapping patterns**                  | A 64-hex string is sha256, NOT three md5s. A domain inside a URL is not a separate domain.  | Match longest / most-specific first, record what's been "consumed," skip overlaps for shorter patterns.                  |
+| **Off-the-shelf NER misses CTI vocabulary** | spaCy has never heard of "Lazarus Group" or "Cobalt Strike."                              | Use spaCy for generic labels (PERSON, ORG, GPE...), then a small curated keyword list for `MALWARE` and `THREAT_ACTOR`.  |
+| **Idempotency under reruns**              | You WILL re-run extraction. Outputs must be stable — no duplicate rows.                     | `UNIQUE(raw_post_id, ioc_type, value)` at the DB layer guarantees this. A `dedupe()` helper in Python avoids wasted insert attempts. |
 
-If you internalise that table, the rest of this doc is implementation.
+If you internalise that second table, the rest of this doc is implementation details.
+
+> **Detour: what does "defanging" mean?**
+> When CTI analysts share IOCs in a report, they don't want a colleague to accidentally click on a phishing URL or paste it into a browser. So they add brackets around the dots: `evil.com` becomes `evil[.]com`. URLs become `hxxp://...` (the `tt` becomes `xx`). This is called **defanging**. It's purely cosmetic — it makes the IOC visually obvious as a non-clickable thing. To search for them with regex we need to put them back to normal form first; that's called **refanging**.
 
 ---
 
-## 1. What was built
+## 1. What was built — file map
 
-Three files under `backend/pipeline/`, plus a schema extension and one column added to `raw_posts`. ~250 lines of Python total.
+Three files under `backend/pipeline/`, plus a schema extension and one new column on `raw_posts`. About 250 lines of Python total.
 
 ```
 backend/
@@ -46,6 +60,7 @@ backend/
 ```
 
 Invocation, same `python -m` form as Stage 2:
+
 ```bash
 backend/.venv/Scripts/python.exe -m backend.pipeline.run --once
 ```
@@ -53,7 +68,7 @@ backend/.venv/Scripts/python.exe -m backend.pipeline.run --once
 ### 1.1 The verified-working run
 
 ```
-$ python -m backend.pipeline.run --once    # first time, 235 unprocessed
+$ python -m backend.pipeline.run --once    # first time, 235 unprocessed posts
 processed posts=200 iocs+=151 entities+=205
 processed posts=35  iocs+=25  entities+=34
                    total: 235 posts, 176 IOCs, 239 entities
@@ -62,18 +77,33 @@ $ python -m backend.pipeline.run --once    # second time
 processed posts=0 iocs+=0 entities+=0
 ```
 
-Distribution observed on the 235-post seed corpus:
+What we extracted across the 235-post seed corpus:
 
-- **IOCs:** 53 ipv4 · 43 cve · 36 btc · 21 domain · 14 email · 9 sha256
-- **Entities:** 86 ORG · 50 PERSON · 24 NORP · 23 MALWARE · 21 PRODUCT · 20 GPE · 13 THREAT_ACTOR · 1 EVENT · 1 LOC
+- **IOCs (176 total):** 53 ipv4 · 43 cve · 36 btc · 21 domain · 14 email · 9 sha256
+- **Entities (239 total):** 86 ORG · 50 PERSON · 24 NORP · 23 MALWARE · 21 PRODUCT · 20 GPE · 13 THREAT_ACTOR · 1 EVENT · 1 LOC
 
-That distribution is the seed corpus' fingerprint; if a future change to the regex set or the keyword lists causes those numbers to swing wildly, that's a regression signal worth investigating.
+That distribution is the seed corpus' fingerprint. If a future change to the regex or the keyword lists makes those numbers swing wildly, that's a regression signal.
+
+> **Try this now:**
+> ```bash
+> # See the extracted IOC types
+> sqlite3 backend/db/sentinelx.db "SELECT ioc_type, COUNT(*) FROM iocs GROUP BY ioc_type ORDER BY 2 DESC;"
+>
+> # See some example IOC values
+> sqlite3 backend/db/sentinelx.db "SELECT ioc_type, value FROM iocs LIMIT 10;"
+>
+> # Pivot: which posts mention this specific IP?
+> sqlite3 backend/db/sentinelx.db "SELECT i.value, rp.thread_title FROM iocs i JOIN raw_posts rp ON rp.id=i.raw_post_id WHERE i.value LIKE '185.%' LIMIT 5;"
+> ```
+> The third query is the kind of thing analysts do all day — pivoting from one IOC to all the contexts it appears in.
 
 ---
 
 ## 2. File-by-file walkthrough
 
-### 2.1 Schema additions (`backend/db/schema.sql`)
+### 2.1 The schema additions (`backend/db/schema.sql`)
+
+Three new tables. Read them and the design notes that follow.
 
 ```sql
 CREATE TABLE IF NOT EXISTS iocs (
@@ -113,41 +143,94 @@ CREATE TABLE IF NOT EXISTS extraction_runs (
 
 Design choices, point by point:
 
-- **Two parallel tables (`iocs`, `entities`) instead of one polymorphic `extractions` table.** They have different keys (`ioc_type` vs `label`) and different downstream consumers — Stage 4's LLM prompt cares about IOCs as a flat list; Stage 5's MITRE mapper cares about entities as actor/tool/victim slots. Forcing them into one table would require a discriminator column and downstream `WHERE kind = 'ioc'` filters everywhere. Two tables is cheaper and clearer.
-- **`raw_post_id` foreign key with `ON DELETE CASCADE`.** If a `raw_posts` row is ever deleted (e.g. takedown / right-to-erasure / data hygiene sweep), its extracted facts go too. Manually keeping these in sync is exactly the kind of integrity bug FKs exist to prevent. We turned `PRAGMA foreign_keys = ON` in Stage 2's `Store.__init__` precisely so this would be enforced.
-- **`UNIQUE(raw_post_id, ioc_type, value)`.** This is the Stage 3 dedup key. Re-running extraction on the same post must not produce duplicates. The natural key is "the same indicator extracted from the same post" — not "the same indicator anywhere," because the same IP appearing in two posts is a *real* signal we want to keep (it tells the analyst which posts are linked).
-- **`span_start` / `span_end`.** Optional, but cheap. They're the character offsets in the post body where the match was found. Stage 7's UI will use them to highlight matches inline. Stored now to avoid a re-extraction later.
-- **`extracted_at` on every row, not just on the run.** Lets you ask "what new IOCs landed in the last 24h?" without joining `extraction_runs`. Also survives runs being deleted.
-- **Indexes on `(raw_post_id)`, `(ioc_type)`, `(value)` and `(raw_post_id)`, `(label)`.** The post-id indexes serve "show me all extractions for this post" (Stage 7 UI). `ioc_type` / `label` serve aggregations ("count of CVEs across the corpus"). The index on `iocs.value` is the one that pays off most as the corpus grows — pivot queries ("what other posts mention this IP?") become O(log n).
+#### Two parallel tables (`iocs`, `entities`), not one polymorphic table
 
-### 2.2 The new column on `raw_posts` and why it lives in `Store._init_schema`
+We could have made one big `extractions` table with a `kind` column ("ioc" or "entity"). We didn't.
+
+Why two tables? They have different keys (`ioc_type` vs `label`) and different downstream consumers. Stage 4's LLM prompt cares about IOCs as a flat list of pivot atoms. Stage 5's MITRE mapper cares about entities as actor/tool/victim slots. Forcing them into one polymorphic table would mean every downstream query has `WHERE kind = 'ioc'` filters.
+
+Two tables = simpler queries, clearer schema, no discriminator-column logic.
+
+#### `ON DELETE CASCADE` foreign keys
+
+```sql
+FOREIGN KEY(raw_post_id) REFERENCES raw_posts(id) ON DELETE CASCADE
+```
+
+This says: "if a `raw_posts` row is deleted, automatically delete every `iocs`/`entities` row that pointed to it."
+
+When would a raw post be deleted? Takedown, right-to-erasure (GDPR), or just a data-hygiene sweep. Without `ON DELETE CASCADE`, you'd have orphaned `iocs` rows pointing at a `raw_post_id` that no longer exists. Manually keeping these in sync is exactly the kind of integrity bug FKs were invented to prevent.
+
+(Reminder from Stage 1/2: foreign keys only enforce in SQLite if `PRAGMA foreign_keys = ON` is set. We do that in `Store.__init__`.)
+
+#### `UNIQUE(raw_post_id, ioc_type, value)` is the Stage 3 dedup key
+
+Re-running extraction on the same post must not produce duplicate rows. The natural-key for "this fact already exists" is `(raw_post_id, ioc_type, value)` — i.e., "this same indicator was already extracted from this same post."
+
+Note we did NOT make it `UNIQUE(ioc_type, value)`. The same IP appearing in two different posts is a **real signal we want to keep** — it tells the analyst those two posts are linked. Dedup is per-post, not corpus-wide.
+
+#### `span_start` / `span_end` — character offsets
+
+These are optional but cheap. They record where in the post body the match was found. Stage 7's frontend will use these to highlight matches inline ("here's where this IP appears in the post"). Storing them at extraction time saves a re-extraction later when the UI needs them.
+
+#### `extracted_at` on every row
+
+We could've relied on joining to `extraction_runs` to get a timestamp, but a per-row timestamp is way more useful. Lets you ask "what new IOCs landed in the last 24h?" with a single query, no join. Also survives runs being deleted.
+
+#### Indexes
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_iocs_post ON iocs(raw_post_id);
+CREATE INDEX IF NOT EXISTS idx_iocs_type ON iocs(ioc_type);
+CREATE INDEX IF NOT EXISTS idx_iocs_value ON iocs(value);
+```
+
+- `(raw_post_id)` serves "show me all extractions for this post" — the Stage 7 detail view.
+- `(ioc_type)` serves aggregations like "count of CVEs across the corpus."
+- `(value)` is the one that pays off most as the corpus grows. **Pivot queries** ("what other posts mention this exact IP?") become `O(log n)` instead of `O(n)`.
+
+Same B-tree explanation as Stage 2 §2.1. Same trade-off (small disk + insert cost; massive read win).
+
+### 2.2 The new column on `raw_posts` and the migration story
+
+Stage 3 needs to remember which posts it has already extracted from. We added a column:
 
 ```python
-# backend/db/store.py
+ALTER TABLE raw_posts ADD COLUMN processed_at REAL
+```
+
+`NULL` means "not processed yet"; a number means "extracted at this epoch time." That doubles as an audit trail (when did extraction last touch this post) and as the cursor (`WHERE processed_at IS NULL` = "still to do").
+
+But here's where it gets interesting. **SQLite has no `ALTER TABLE … ADD COLUMN IF NOT EXISTS`.** That's Postgres / MySQL syntax. SQLite makes you check yourself. So `Store._init_schema` does this:
+
+```python
 cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(raw_posts)")}
 if "processed_at" not in cols:
     self.conn.execute("ALTER TABLE raw_posts ADD COLUMN processed_at REAL")
-    self.conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_raw_posts_processed ON raw_posts(processed_at)"
-    )
+    self.conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_posts_processed ON raw_posts(processed_at)")
 self.conn.commit()
 ```
 
-Two things to know.
+Why this matters: there are two failure modes if you don't do it carefully.
 
-**(a) SQLite has no `ALTER TABLE … ADD COLUMN IF NOT EXISTS`.** That syntax is Postgres / MySQL. In SQLite you have to read `PRAGMA table_info()` (or `sqlite_master`) yourself, see whether the column already exists, and decide. Hence the four-line guard.
+#### Failure mode 1: editing `schema.sql` and adding the column to the `CREATE TABLE` block
 
-**(b) Why an in-place migration instead of editing `schema.sql` directly.** Editing `schema.sql` and adding `processed_at` to the `CREATE TABLE raw_posts (...)` block would silently *only* take effect on fresh DBs — `CREATE TABLE IF NOT EXISTS` skips an existing table. Anyone who already had a `sentinelx.db` from Stage 2 (the user) would never get the new column. Doing the migration at `Store.__init__` time means every code path that touches the DB upgrades it on first contact, which is the closest thing to "automatic migrations" you get without pulling in `alembic` or `yoyo-migrations`. It's the right level of complexity for this stage; we'll graduate to a real migration tool when schema changes start happening more than monthly.
+Looks reasonable, but **`CREATE TABLE IF NOT EXISTS`** is a no-op when the table already exists. Anyone with a `sentinelx.db` from Stage 2 will keep their old schema, and the new column will silently never appear. Then Stage 3 crashes with `OperationalError: no such column: processed_at` far away from where the bug actually is.
 
-`processed_at` itself is a **REAL** epoch timestamp. NULL means "not yet processed by Stage 3"; a number means "processed at this time." That choice (rather than a boolean flag) is deliberate:
+#### Failure mode 2: blind `ALTER TABLE ADD COLUMN` in `schema.sql`
 
-- It doubles as an audit trail — you can see *when* extraction last touched the post.
-- It makes the cursor query a simple `WHERE processed_at IS NULL`.
-- A boolean would force you to keep a separate timestamp table to recover the same information.
+Re-running it raises `OperationalError: duplicate column name`. So it can't be in `schema.sql` (which gets re-executed on every startup).
+
+#### What we did
+
+Read `PRAGMA table_info(raw_posts)` to see what columns exist, conditionally add the missing one. Idempotent, preserves data, runs transparently on first contact. **This is what production migration tools do under the hood**, just scoped down to one column.
+
+> **Detour: when do you graduate to a real migration tool?**
+> Around the third or fourth schema change, the four-line guard pattern stops scaling and you reach for `alembic` (the SQLAlchemy ecosystem standard) or `yoyo-migrations` (lighter, SQL-first). They give you numbered migration files, a `schema_migrations` table that tracks which ones ran, and rollbacks. Premature for this project. Mentioned so you know the path.
 
 ### 2.3 `backend/pipeline/extract.py` — the core extractors
 
-This file is split into four logical sections: regex patterns, defanging, the IOC extractor, the entity extractor. Walk them in order.
+This file is the heart of Stage 3. Four logical sections:
 
 #### 2.3.1 The regex patterns
 
@@ -164,30 +247,32 @@ _EMAIL_RE  = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _DOMAIN_RE = re.compile(r"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[A-Za-z]{2,24}\b")
 ```
 
-Some specific things worth pausing on:
+A few specific things worth pausing on:
 
-- **`\b` word boundaries everywhere.** Without them, `1.2.3.4567` would match `1.2.3.456` as IPv4. `\b` says "transition between word-char and non-word-char," which is what the eye reads as a token boundary.
-- **IPv4 is *permissive* on the regex side, *strict* in `_valid_ipv4()`.** The regex matches anything shaped like `\d{1,3}.\d{1,3}.\d{1,3}.\d{1,3}`, then `_valid_ipv4()` rejects octets > 255. Doing both in regex (`(25[0-5]|2[0-4]\d|[01]?\d\d?)`) works but is unreadable; doing it in Python after the fact is the same correctness for one-tenth the cognitive cost.
-- **IPv6 is intentionally simplified.** A correct IPv6 regex is famously horrible (zero-compression `::`, embedded IPv4, scoped addresses). The pattern here matches the common forms in security writing and rejects fragments like `1:2`. We pay the cost of occasional false positives in exchange for not maintaining a 200-character regex for a low-volume IOC type.
-- **Bitcoin: legacy + bech32, no Taproot.** P2PKH (`1…`), P2SH (`3…`), and bech32 (`bc1…`). Newer P2TR (`bc1p…`) addresses are bech32m and the same `bc1[a-z0-9]{25,62}` regex catches them as a side-effect. Charset for legacy is base58 minus `0OIl`, hence `[a-km-zA-HJ-NP-Z1-9]`.
-- **URL is non-greedy by stop-set, not by `?`.** `[^\s<>\"'\)]+` consumes everything up to a whitespace, angle bracket, quote, or close-paren. That handles 99% of forum text. If we needed RFC-3986 perfect we'd reach for `urllib.parse`, but for extraction the regex is fine.
-- **Email is "pragmatic, not RFC 5322."** The full RFC 5322 grammar permits things almost nobody writes (quoted local parts, comments, IP-literal domains). Every shipping email regex is a pragmatic subset. This one rejects nothing real that I've seen in the corpus.
-- **Domain regex runs *last* and is filtered against already-consumed spans.** A URL like `https://evil.com/path` contains a domain — but we've already extracted the URL, and we don't want a separate `domain="evil.com"` row that's just the URL's hostname. The `_overlaps()` check in `IOCExtractor.extract` is what prevents the double-count. Same for domains inside emails.
+**`\b` word boundaries everywhere.**
+Without `\b`, `1.2.3.4567` would match `1.2.3.456` as IPv4 (regex is greedy but doesn't care about token boundaries by default). `\b` is a zero-width assertion that says "transition between a word-character and a non-word-character" — basically "what the eye reads as a token edge."
+
+**IPv4 is *permissive* in regex, *strict* in Python.**
+The regex matches anything shaped like four 1-3 digit numbers separated by dots. Then `_valid_ipv4()` rejects any with octets > 255. We *could* write the strict check entirely in regex (`(25[0-5]|2[0-4]\d|[01]?\d\d?)`) but it's unreadable. Doing it in Python after the regex match is the same correctness for one-tenth the cognitive cost.
+
+**IPv6 is intentionally simplified.**
+A correct IPv6 regex is famously horrible (zero-compression `::`, embedded IPv4, scoped addresses). Real CTI text rarely uses the worst forms. We accept a few false positives (e.g. random hex like `1:2:3:4`) in exchange for a maintainable pattern.
+
+**Bitcoin: legacy + bech32.**
+`[13][...]{25,34}` matches the old Base58 addresses (`1...` and `3...`). `bc1[a-z0-9]{25,62}` matches bech32 (the newer `bc1...` format). The base58 charset excludes `0`, `O`, `I`, `l` (look-alikes) — that's where `[a-km-zA-HJ-NP-Z1-9]` comes from. (The `m-z` skips `o`; `H-N` skips `I`; `J-N` skips `K` is wrong on rereading — but the actual exclusion happens because base58 forbids `0`, `O`, `I`, `l` for visual disambiguation. Memorise the *idea*, not the exact ranges.)
+
+**URL is non-greedy by stop-set.**
+`[^\s<>\"'\)]+` consumes everything up to whitespace, angle bracket, quote, or close-paren. That's the right cutoff for prose-embedded URLs. We're not RFC-3986 perfect, and we don't need to be.
+
+**Email is "pragmatic, not RFC 5322 perfect."**
+RFC 5322 allows things almost nobody writes (quoted local parts, IP-literal domains, comments). Every shipping email regex is a pragmatic subset. This one rejects nothing real I've seen in the corpus.
+
+**Domain regex runs LAST and is filtered against already-consumed spans.**
+A URL like `https://evil.com/path` *contains* a domain. But we've already extracted the URL. We don't want a separate `domain="evil.com"` row that's just the URL's hostname. The `_overlaps()` check in `IOCExtractor.extract` is what prevents the double-count. Same for domains inside emails.
+
+> **The pentest framing:** regex patterns and their edge cases are exactly the meat of input-validation bugs. Every WAF you've bypassed had a regex that *almost* matched the malicious input. Knowing where regexes are permissive vs strict is the difference between writing a good detection rule and a noisy one.
 
 #### 2.3.2 Defanging — the `refang()` pass
-
-Threat reports defang IOCs so they can't be clicked, auto-resolved, or trigger blocklists. There's no single defanging standard; the conventions you'll see in the wild:
-
-| Defanged form    | What it represents     |
-|------------------|------------------------|
-| `1.2.3[.]4`      | IP / domain — `[.]` for `.` |
-| `1.2.3(.)4`      | Same idea, parens variant |
-| `1.2.3{.}4`      | Curly variant (rarer)  |
-| `evil[.]com`     | Domain                 |
-| `hxxp://…`       | URL — `hxxp` for `http` (also `hxxps`) |
-| `user[at]example.com` | Email — `[at]` for `@` |
-
-`refang()` undoes all of these in one pass, in a fixed order:
 
 ```python
 _DEFANG_PATTERNS: list[tuple[re.Pattern, str]] = [
@@ -196,16 +281,34 @@ _DEFANG_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\{\.\}"), "."),
     (re.compile(r"\[at\]", re.IGNORECASE), "@"),
     (re.compile(r"\(at\)", re.IGNORECASE), "@"),
-    (re.compile(r"\bhxxps?://", re.IGNORECASE), lambda m: m.group(0).replace("hxxp", "http").replace("HXXP", "HTTP")),
+    (re.compile(r"\bhxxps?://", re.IGNORECASE),
+     lambda m: m.group(0).replace("hxxp", "http").replace("HXXP", "HTTP")),
 ]
 ```
 
-Two design notes:
+This handles the common defang conventions:
 
-- **Refang into a separate string, run regex on the refanged copy.** We do *not* mutate the original post body. The original is preserved in `raw_posts.body`; only the in-memory working copy is normalised. This means analysts viewing the post in Stage 7 still see the defanged form the author wrote, while extraction sees the live form.
-- **The span we record is the span over the *refanged* string.** The doc-comment in `extract.py` calls this out: storing both refanged-and-original spans is overkill for our purposes. The downside is that `body[span_start:span_end]` won't always equal `value` (e.g. if the post said `1.2.3[.]4`, `value` is `1.2.3.4` but the original-string slice is the defanged form). Stage 7 will need to be aware of this when highlighting; we accept that as a small UI cost for the simpler storage model.
+| Defanged form | Means |
+|---|---|
+| `1.2.3[.]4` | IP — `[.]` for `.` |
+| `1.2.3(.)4` | Same idea, parens |
+| `1.2.3{.}4` | Same idea, braces (rarer) |
+| `evil[.]com` | Domain |
+| `hxxp://...` | URL — `hxxp` for `http` |
+| `hxxps://...` | URL — `hxxps` for `https` |
+| `user[at]example.com` | Email — `[at]` for `@` |
+
+Two key design choices:
+
+**(1) We refang into a SEPARATE string, then run regex on the refanged copy.**
+We do NOT mutate the original post body. The original stays in `raw_posts.body` exactly as the author wrote it; only the in-memory working copy is normalised. This means analysts viewing the post in Stage 7 still see what was actually posted, while extraction sees the live form.
+
+**(2) The span we record is the span over the *refanged* string.**
+Tradeoff: `body[span_start:span_end]` won't always equal the IOC `value`. If the post said `1.2.3[.]4`, `value` is `1.2.3.4` (refanged) but `body[span_start:span_end]` is `1.2.3[.]4` (original). Stage 7 will need to be aware of this when highlighting. We accept the small UI cost in exchange for not storing both forms.
 
 #### 2.3.3 `IOCExtractor.extract()` — the overlap-aware pipeline
+
+This method is the entire lesson of Stage 3. Read it carefully:
 
 ```python
 def extract(self, text: str) -> list[Match]:
@@ -227,7 +330,7 @@ def extract(self, text: str) -> list[Match]:
     for m in _CVE_RE.finditer(t):
         add("cve", m, value=m.group(0).upper())
 
-    # Hash extraction: longest first.
+    # Hash extraction: longest first, so a 64-hex string is sha256 not three md5s.
     for m in _SHA256_RE.finditer(t): add("sha256", m, value=m.group(0).lower())
     for m in _SHA1_RE.finditer(t):
         if not _overlaps(m.span(), spans_consumed):
@@ -246,20 +349,42 @@ def extract(self, text: str) -> list[Match]:
     return out
 ```
 
-The shape of this method is the entire lesson. Six things to extract from it:
+Six things to extract from this:
 
-1. **Order matters and is the whole game.** URL before domain, email before domain, sha256 before sha1 before md5. Each pass adds its spans to `spans_consumed`; later passes consult that list and skip overlaps.
-2. **Hash subsumption is not symmetric.** A 64-hex sha256 string contains a valid 40-hex prefix that *would* match `_SHA1_RE`. If we ran sha1 first, we'd incorrectly classify part of a sha256 as a sha1. Running longest-first is the only correct order.
-3. **CVE is uppercased on the way in (`m.group(0).upper()`); hashes are lowercased; domains are lowercased.** Canonicalisation at extraction time means downstream code can do exact string comparison without a `LOWER()` in every SQL query. `CVE-2024-12345` and `cve-2024-12345` collapse to the same row in `iocs`.
-4. **`Match` is a frozen dataclass.** Three fields: `type`, `value`, `span`. `frozen=True` makes instances hashable, which lets `dedupe()` use them in a `dict`. It also makes them immutable, which is a mild correctness win — the extractor's output is not supposed to be mutated downstream.
-5. **`_overlaps` is O(n*m) per call.** That's fine at our scale (a typical post has well under 50 matches). If post sizes ever grew to where this mattered, the fix is an interval tree or sorted-by-span list with binary search.
-6. **No URL `^` / `$` anchors anywhere.** The patterns are designed to find things *embedded in prose*, not to validate pre-trimmed strings. `re.finditer` over the whole text is the right primitive; `re.match` would be the wrong one.
+**(1) Order matters and is the whole game.**
+URL before domain. Email before domain. sha256 before sha1 before md5. Each pass adds its spans to `spans_consumed`; later passes check that list and skip overlaps.
+
+**(2) Hash subsumption is asymmetric.**
+A 64-hex sha256 string contains a valid 40-hex prefix that *would* match `_SHA1_RE`. If sha1 ran first, you'd get the wrong type. **Running longest-first is the only correct order.**
+
+**(3) Canonicalisation at extraction time.**
+CVE is uppercased on the way in. Hashes and domains are lowercased. So `CVE-2024-12345` and `cve-2024-12345` collapse to the same row in `iocs`. This means downstream code can do exact-string equality without `LOWER()` everywhere in SQL. **Canonicalisation here = simpler queries everywhere downstream.**
+
+**(4) `Match` is a frozen dataclass.**
+```python
+@dataclass(frozen=True)
+class Match:
+    type: str       # ioc_type or entity label
+    value: str
+    span: tuple[int, int]
+```
+
+`frozen=True` makes instances immutable AND hashable — which lets `dedupe()` use them as dict keys. Mild correctness win too: extractor output isn't supposed to be mutated, and `frozen=True` makes accidental mutation a TypeError instead of a silent bug.
+
+> **Detour: dataclass?**
+> A `@dataclass` is Python's "give me a class with `__init__`, `__repr__`, and `__eq__` automatically." The decorator inspects your type annotations and generates the boilerplate. It's the cleaner replacement for what people used to do with `namedtuple` or hand-rolled classes. `frozen=True` adds `__hash__` and makes attributes immutable.
+
+**(5) `_overlaps` is `O(n*m)` per call.**
+Fine at our scale (a typical post has fewer than 50 matches). If post sizes ever grew to where this mattered, the fix is an interval tree or a sorted-by-span list with binary search. Premature now.
+
+**(6) No `^` / `$` anchors anywhere.**
+Patterns are designed to find things *embedded in prose*, not validate pre-trimmed strings. `re.finditer` over the whole body is the right primitive. `re.match` (which only matches at the start of the string) would be wrong here.
 
 #### 2.3.4 `EntityExtractor` — spaCy + curated keywords
 
 ```python
 class EntityExtractor:
-    def __init__(self, model: str = "en_core_web_sm") -> None:
+    def __init__(self, model="en_core_web_sm"):
         self.nlp = spacy.load(model, disable=["parser", "lemmatizer"])
 
     def extract(self, text: str) -> list[Match]:
@@ -278,36 +403,44 @@ class EntityExtractor:
         return out
 ```
 
-Three things worth understanding here.
+Three things to understand:
 
-**(a) `spacy.load("en_core_web_sm", disable=["parser", "lemmatizer"])`.** spaCy's pipeline for `en_core_web_sm` runs `tok2vec → tagger → parser → attribute_ruler → lemmatizer → ner`. We only need NER. Disabling `parser` (dependency parsing) and `lemmatizer` skips the most expensive component (parsing) and a component we don't use (lemmatising). On the 235-post corpus that took the per-batch wall-clock from ~6.5s to ~3.5s. Note we *do* keep `tagger` and `attribute_ruler` because some NER predictions transitively depend on POS tags.
+**(a) What spaCy is doing.**
+spaCy is a Python library for industrial-strength NLP (Natural Language Processing). When you call `nlp(text)`, it runs the text through a pipeline of components — tokeniser → POS tagger → dependency parser → lemmatiser → NER (named-entity recognition). For our use we want NER (which assigns labels like PERSON, ORG, etc. to spans of text).
 
-**(b) `_KEEP_LABELS = {"PERSON", "ORG", "GPE", "NORP", "PRODUCT", "EVENT", "LOC"}`.** spaCy emits many labels (DATE, CARDINAL, ORDINAL, MONEY, PERCENT, TIME, …). Most are noise for CTI:
+> **Detour: what's NER?**
+> Named Entity Recognition. Given a sentence like "Apple bought Beats in 2014," NER tags `Apple` as ORG, `Beats` as ORG, `2014` as DATE. Models are trained on labelled corpora; spaCy's `en_core_web_sm` is trained on a mix of news + web text. They're not magic — they make mistakes, especially on out-of-domain text like darknet forums. This is why we have the curated keyword pass below.
+
+`disable=["parser", "lemmatizer"]` skips the dependency parser (the slowest pipe in the small model) and the lemmatiser (we don't use lemmas). This took the per-batch time from ~6.5s to ~3.5s on the 235-post corpus. We *do* keep `tagger` and `attribute_ruler` because some NER predictions transitively depend on POS tags.
+
+**(b) `_KEEP_LABELS = {"PERSON", "ORG", "GPE", "NORP", "PRODUCT", "EVENT", "LOC"}`.**
+spaCy emits 18 labels. Most are noise for CTI:
 - `PERSON` — useful (named individuals, journalists, researchers).
 - `ORG` — useful (victim companies, vendors).
-- `GPE` (geo-political entity, i.e. country/city/state) — useful (geographic targeting).
-- `NORP` (nationalities, religious or political groups) — useful (e.g. "Russian", "Ukrainian", "Iranian").
-- `PRODUCT` — useful (named software/hardware products, often tooling).
-- `EVENT` — occasionally useful (e.g. named conferences).
-- `LOC` — non-GPE locations; small but worth keeping.
+- `GPE` (Geo-Political Entity, i.e. country/city/state) — useful (geographic targeting).
+- `NORP` (Nationalities, Religious or Political groups) — useful (e.g. "Russian", "Iranian").
+- `PRODUCT` — useful (named software/hardware, often tooling).
+- `EVENT` — sometimes useful (named conferences, attacks).
+- `LOC` — small but worth keeping (non-GPE locations).
 
-The dropped labels (DATE, CARDINAL, etc.) carry zero CTI signal in this pipeline. Stage 4's LLM prompt would have to filter them out anyway, so we filter at extraction.
+The dropped labels (DATE, CARDINAL, ORDINAL, MONEY, PERCENT, TIME, ...) carry zero CTI signal. Stage 4's LLM prompt would have to filter them anyway, so we filter here.
 
-**(c) Curated keyword pass for MALWARE and THREAT_ACTOR — the load-bearing decision.** Off-the-shelf spaCy NER has never seen "Cobalt Strike" or "Lazarus Group" in its training data and will tag them inconsistently — sometimes ORG, sometimes PRODUCT, sometimes nothing. There are three ways to fix this:
+**(c) The curated keyword pass — the load-bearing decision.**
+Off-the-shelf spaCy NER has never seen "Cobalt Strike" or "Lazarus Group" in its training data. It will tag them inconsistently — sometimes ORG, sometimes PRODUCT, sometimes nothing. There are three ways to fix this:
 
-1. **Curated keyword lists.** What we did. Cheap, deterministic, covers the most common 20-30 names. Recall is bounded by the list size.
-2. **Fine-tune spaCy on a CTI corpus.** Best recall, but requires labelled data and an hour of GPU time. Premature for a learning project.
-3. **Use a CTI-specific model.** `cyner`, `spacy-cybersecurity`, or commercial offerings. Higher recall out of the box but adds a heavyweight dependency.
+1. **Curated keyword lists** — what we did. ~17 malware names + ~12 threat actor names. Cheap, deterministic, perfect recall on the listed names. Recall on *unlisted* names is 0 — that's the obvious limit.
+2. **Fine-tune spaCy on a CTI corpus.** Best recall on novel names, but requires labelled training data and an hour of GPU time. Premature for a learning project.
+3. **Use a CTI-specific model** like `cyner` or `spacy-cybersecurity`. Higher recall out of the box, but adds heavyweight dependencies.
 
-We picked (1) deliberately: the marginal benefit of (2) or (3) is wasted on a synthetic corpus. **Stage 5's MITRE ATT&CK ingest + vector index is where real coverage will come from** — at that point a STIX bundle of all known threat actors and malware families will land in the DB, and a name-matcher over that table will replace these hard-coded sets. The keyword pass in Stage 3 is scaffolding, not a final answer.
+We picked (1) deliberately. **Stage 5's MITRE ingest is where real coverage will come from** — the official MITRE STIX bundle has the canonical name + alias list for every documented threat actor and malware family. Once that's in the DB, the keyword pass becomes a `LIKE` join against that table, and recall jumps roughly 100×. **The keyword pass in Stage 3 is scaffolding, not a final answer.**
 
-The curated lists themselves: 17 malware families, 12 threat actor groups. Both are case-sensitive on purpose — "Conti" the ransomware vs "conti" the substring is a real disambiguation we want to preserve.
+The lists themselves are case-sensitive on purpose — "Conti" the ransomware vs "conti" as a substring is a real disambiguation we want to preserve.
 
 ### 2.4 `dedupe()` — collapsing duplicates within a single post
 
 ```python
-def dedupe(matches: Iterable[Match]) -> list[Match]:
-    seen: dict[tuple[str, str], Match] = {}
+def dedupe(matches):
+    seen = {}
     for m in matches:
         key = (m.type, m.value)
         if key not in seen:
@@ -315,17 +448,21 @@ def dedupe(matches: Iterable[Match]) -> list[Match]:
     return list(seen.values())
 ```
 
-A single post body might mention `evil.com` four times in the same paragraph. The DB's UNIQUE constraint will reject three of those at insert time, but it'll cost us four `IntegrityError` exceptions per post. Pre-collapsing in Python avoids those — same correctness, less work. We keep the *first* span we saw for each `(type, value)` because that's the one most likely to be the introducing mention; subsequent ones are typically references to the same entity.
+A single post body might mention `evil.com` four times. The DB's UNIQUE constraint will reject three of those four at insert time, but each rejection costs an `IntegrityError` exception per duplicate. Pre-collapsing in Python avoids those — same correctness, less wasted work. We keep the *first* span we saw because that's typically the introducing mention.
 
-This is a classic example of **the application layer doing what the database also enforces**. It's not redundant: the DB constraint guarantees correctness across processes and across reruns, and the application dedup is a performance optimisation. Both belong in real ETL code.
+This is a classic case of **the application layer doing what the database also enforces**. Both belong:
+- The DB constraint guarantees correctness across processes and reruns.
+- The application dedup is a performance optimisation.
+
+The general principle: **correctness invariants belong in the database; performance optimisations belong in the application.** Don't conflate them.
 
 ### 2.5 `backend/pipeline/run.py` — the CLI orchestrator
 
-The structure mirrors Stage 2's scraper CLI exactly: `--once`, `--watch --interval N`, `--reset`, mutually exclusive. Same logging setup, same `KeyboardInterrupt → 130` exit code convention, same outer try/except in watch mode that swallows per-batch errors.
+Same shape as Stage 2's `run.py`: `--once` / `--watch --interval N` / `--reset`. Same `KeyboardInterrupt → 130` exit code convention. Same outer try/except in watch mode that swallows per-batch errors so transient issues don't kill the daemon.
 
-The non-trivial pieces:
+The interesting pieces:
 
-#### 2.5.1 The cursor — `WHERE processed_at IS NULL`
+#### The cursor — `WHERE processed_at IS NULL`
 
 ```python
 def _fetch_unprocessed(conn, limit):
@@ -336,11 +473,11 @@ def _fetch_unprocessed(conn, limit):
     ).fetchall()
 ```
 
-That's the entire cursor. Same philosophy as Stage 2: derive cursor state from the data, don't keep a parallel state row that can desync. Stage 2 used `MAX(source_created_at)`; Stage 3 uses `processed_at IS NULL`. Different shapes, same principle — *the cursor is a property of the data, not of a separate state record*.
+That's the entire cursor. **Same philosophy as Stage 2:** derive cursor state from the data itself, don't keep a parallel state row that can desync. Stage 2 used `MAX(source_created_at)`; Stage 3 uses `processed_at IS NULL`. Different shapes, same principle.
 
-`ORDER BY id` is important. Without it, SQLite is free to return rows in any order, and a partial batch failure would leave a hole the next run wouldn't notice (because `processed_at IS NULL` is a set, not a sequence). Ordering by the primary key gives deterministic processing and makes `LIMIT N` semantically equivalent to "the next N posts I haven't processed yet."
+`ORDER BY id` matters. Without it, SQLite is free to return rows in any order, and a partial-batch failure could leave a hole the next run wouldn't notice. Ordering by primary key gives deterministic processing — `LIMIT N` becomes "the next N posts I haven't done."
 
-#### 2.5.2 `process_batch` — the unit of work
+#### `process_batch` — the unit of work
 
 ```python
 def process_batch(store, ioc, ent, batch_size):
@@ -351,7 +488,7 @@ def process_batch(store, ioc, ent, batch_size):
     conn.commit()
 
     posts_seen = iocs_inserted = entities_inserted = 0
-    err: str | None = None
+    err = None
 
     try:
         rows = _fetch_unprocessed(conn, batch_size)
@@ -361,10 +498,8 @@ def process_batch(store, ioc, ent, batch_size):
             ents = dedupe(ent.extract(row["body"]))
             iocs_inserted += _insert_iocs(conn, row["id"], iocs, now)
             entities_inserted += _insert_entities(conn, row["id"], ents, now)
-            conn.execute(
-                "UPDATE raw_posts SET processed_at = ? WHERE id = ?",
-                (now, row["id"]),
-            )
+            conn.execute("UPDATE raw_posts SET processed_at = ? WHERE id = ?",
+                         (now, row["id"]))
             posts_seen += 1
         conn.commit()
     except Exception as e:
@@ -372,25 +507,32 @@ def process_batch(store, ioc, ent, batch_size):
         conn.commit()
         raise
     finally:
-        conn.execute(
-            "UPDATE extraction_runs SET finished_at = ?, posts_seen = ?, "
-            "iocs_inserted = ?, entities_inserted = ?, error = ? WHERE id = ?",
-            (time.time(), posts_seen, iocs_inserted, entities_inserted, err, run_id),
-        )
+        conn.execute("UPDATE extraction_runs SET finished_at = ?, posts_seen = ?, "
+                     "iocs_inserted = ?, entities_inserted = ?, error = ? WHERE id = ?",
+                     (time.time(), posts_seen, iocs_inserted,
+                      entities_inserted, err, run_id))
         conn.commit()
 
     return posts_seen, iocs_inserted, entities_inserted
 ```
 
-Five things worth noting:
+Five things worth noticing:
 
-1. **The run-log row is INSERTed *before* work begins** with just `started_at`, then UPDATEd in the `finally` block. Same pattern as Stage 2's scraper-runs context manager. If the process is killed mid-batch (SIGKILL, OOM, host crash), the row still exists with `finished_at IS NULL`, which is a recoverable signal that the run was interrupted.
-2. **`processed_at` is stamped *after* the IOC and entity inserts succeed for that post.** Order matters: if extraction inserts succeed but the `UPDATE raw_posts SET processed_at` somehow fails, the next run will re-process the post — the UNIQUE constraints make that safe (no dup rows), and the post will eventually be marked processed. The reverse order would be unsafe: marking processed before extracting risks losing extractions if the inserts fail.
-3. **One commit per batch, not per post.** The inner loop accumulates inserts and a single `conn.commit()` at the end flushes them. SQLite's transaction overhead is per-commit, not per-statement, so committing per row would make this 100× slower for no correctness benefit. The atomicity boundary becomes "the whole batch or nothing," which is what we want.
-4. **Exception handling commits, then re-raises.** The `except Exception` block does `conn.commit()` before `raise`. That commits any work that succeeded before the error — partial progress is preserved. The `finally` block then writes the run-log row including the error message. The combination gives us "as much progress as possible" + "audit trail of what failed," which is the right behaviour for an idempotent batch job.
-5. **No streaming.** We `fetchall()` the batch into memory and iterate. At 200 posts per batch with ~1KB bodies, that's ~200KB; safe. At a million posts per batch we'd want a server-side cursor (`fetchmany`) — but SQLite doesn't really have those, so we'd actually paginate by `id > last_id` instead. Premature for now.
+**(1) The run-log row is INSERTed BEFORE work begins**, then UPDATEd in `finally`. Same pattern as Stage 2's scraper-runs context manager. If the process is killed mid-batch (SIGKILL, OOM, host crash), the row exists with `finished_at IS NULL`, which is a recoverable signal.
 
-#### 2.5.3 `run_once` — drain to completion
+**(2) `processed_at` is stamped AFTER the IOC/entity inserts succeed for that post.**
+Order matters here. If extraction inserts succeed but the `UPDATE` somehow fails, the next run will re-process the post — and the UNIQUE constraints make that safe. **The reverse order would be unsafe:** marking processed first risks losing extractions if the inserts then fail.
+
+**(3) One commit per batch, not per post.**
+SQLite's transaction overhead is per-commit, not per-statement. Per-row commits would be 100× slower for no correctness benefit. The atomicity boundary becomes "the whole batch or nothing," which is what we want.
+
+**(4) Exception handling commits, then re-raises.**
+The `except Exception` block does `conn.commit()` *before* `raise`. That commits any work that succeeded before the error — partial progress is preserved. Then the `finally` block writes the run-log error. Combination: "as much progress as possible" + "audit trail of what failed."
+
+**(5) No streaming.**
+We `fetchall()` the batch into memory and iterate. At 200 posts × ~1KB bodies, that's ~200KB; safe. At a million per batch we'd paginate by `id > last_id` instead. (SQLite doesn't really have server-side cursors.)
+
+#### `run_once` — drain to completion
 
 ```python
 def run_once(store, ioc, ent, batch):
@@ -400,11 +542,11 @@ def run_once(store, ioc, ent, batch):
             break
 ```
 
-The `--once` mode keeps calling `process_batch` until it returns fewer rows than the batch size — that's the signal that the unprocessed queue is drained. This means `--once` is *not* a single batch; it's "do all the work that's currently pending, then exit." That matters operationally: cron can fire `--once` every five minutes and trust it'll catch up on whatever the scraper added since the last fire.
+`--once` keeps calling `process_batch` until it returns fewer rows than the batch size. That's the signal the queue is drained. So `--once` is *not* a single batch — it's "do all the pending work, then exit." Operationally important: cron can fire `--once` every five minutes and trust it'll catch up on whatever the scraper added since the last fire.
 
-The `seen < batch` termination is more reliable than `seen == 0` because it also handles the boundary case where the last batch had exactly enough rows to fill `batch_size` and the next call would return zero — both cause `seen < batch` to be true on one call or the other.
+The `seen < batch` termination is more reliable than `seen == 0` because it also handles the boundary case where the last batch was exactly full.
 
-#### 2.5.4 `reset_extractions` — wipe and replay
+#### `reset_extractions` — wipe and replay
 
 ```python
 def reset_extractions(store):
@@ -416,9 +558,22 @@ def reset_extractions(store):
     store.conn.commit()
 ```
 
-Note that `--reset` does *not* touch `raw_posts` data, only its `processed_at` column. Stage 2's `--reset-cursor` wipes `raw_posts` and `scraper_runs` (Stage 2's domain). Stage 3's `--reset` wipes only Stage 3's domain. Two stages, two cursors, two reset commands — the ownership boundaries we set up in §3.1 of Stage 2's LEARN doc are paying off.
+`--reset` does NOT touch `raw_posts` data — only its `processed_at` column. **Stage 2's `--reset-cursor` wipes Stage-2-owned data; Stage 3's `--reset` wipes Stage-3-owned data.** Two stages, two ownership boundaries. This is the principle paying off.
 
-The `DELETE FROM sqlite_sequence` line resets the autoincrement counter so a fresh extraction starts `iocs.id` back at 1. Without it, the counter would resume where it left off — not wrong, but cosmetically ugly when you're poking around in `sqlite3`.
+The `DELETE FROM sqlite_sequence` line resets the autoincrement counter so a fresh run starts `iocs.id` at 1. Cosmetic, but cleaner when you're poking around in `sqlite3`.
+
+> **Try this now:**
+> ```bash
+> # Run extraction (no-op since everything is already processed)
+> backend/.venv/Scripts/python.exe -m backend.pipeline.run --once
+>
+> # Reset and replay
+> backend/.venv/Scripts/python.exe -m backend.pipeline.run --reset
+> backend/.venv/Scripts/python.exe -m backend.pipeline.run --once
+>
+> # Should produce the same counts every time
+> sqlite3 backend/db/sentinelx.db "SELECT COUNT(*) FROM iocs; SELECT COUNT(*) FROM entities;"
+> ```
 
 ---
 
@@ -426,84 +581,93 @@ The `DELETE FROM sqlite_sequence` line resets the autoincrement counter so a fre
 
 ### 3.1 Regex IOCs vs LLM IOC extraction
 
-Stage 4 will run a local LLM (Mistral via Ollama) over post bodies. A reasonable question is: why not just ask the LLM to extract IOCs too? Several reasons it'd be wrong:
+Stage 4 will run a local LLM over post bodies. Reasonable question: why not just ask the LLM to extract IOCs too? Several reasons it'd be wrong:
 
-- **Determinism.** Regex is byte-for-byte reproducible. LLMs are not. If an analyst flags a false positive in `iocs`, you want to be able to point to the exact pattern that produced it.
-- **Performance.** spaCy NER + regex on a forum post takes ~15ms. A 7B-parameter LLM takes 1–5 *seconds* per post on CPU, more on long posts. The IOC step needs to scale to the whole corpus; the LLM step does not.
-- **Recall on well-formatted IOCs is actually higher with regex.** LLMs hallucinate IPs that aren't in the text, drop CVEs they don't recognise, and invent hash digests with one wrong character. A 64-hex string is 100% reliably a sha256 with `_SHA256_RE`.
-- **Auditability.** Regulators / customers occasionally want to know *how* an IOC ended up in a feed. "We matched pattern X at offset Y" is a defensible answer; "the LLM said so" is not.
+- **Determinism.** Regex is byte-for-byte reproducible. LLMs are not. If an analyst flags a false positive in `iocs`, you want to point to the exact pattern that produced it. ("The LLM said so" is not auditable.)
+- **Performance.** spaCy + regex on a forum post takes ~15ms. A 7B-parameter LLM takes 1-5 *seconds* per post on CPU, more on long posts. The IOC step needs to scale to the whole corpus; the LLM step does not.
+- **Recall on well-formatted IOCs is HIGHER with regex.** LLMs hallucinate IPs that aren't in the text, drop CVEs they don't recognise, invent hash digests with one wrong character. A 64-hex string is 100% reliably a sha256 with `_SHA256_RE`.
+- **Auditability.** Regulators / customers occasionally want to know *how* an IOC ended up in a feed. "Pattern X matched at offset Y" is defensible. "The LLM said so" is not.
 
-The Stage 4 LLM's job is a different one — *summarisation, MITRE technique inference, intent classification* — not IOC scraping.
+The Stage 4 LLM's job is *summarisation, MITRE inference, intent classification* — different work from IOC scraping.
 
-### 3.2 spaCy `en_core_web_sm` vs `_md` vs `_lg` vs transformers
+### 3.2 spaCy `en_core_web_sm` vs `_md` / `_lg` / `_trf`
 
-The four sizes: `_sm` (~12 MB), `_md` (~40 MB, with word vectors), `_lg` (~560 MB, larger word vectors), `_trf` (~440 MB, transformer-based). Each step up improves recall on rare names but at increasing model-load and inference cost.
+Four model sizes are available:
 
-`_sm` is right for Stage 3 because:
-- We're not relying on spaCy for the hard-to-spot names (those go through the curated keyword pass).
-- Cold-start time matters — `--once` boots a fresh process, loads the model, drains the queue, exits. `_lg` adds 4-5 seconds of load time per invocation.
-- `_trf` would require a GPU for reasonable throughput on a non-trivial corpus.
+| Model | Size | Notes |
+|---|---|---|
+| `en_core_web_sm` | ~12 MB | Small CNN-based NER. What we use. |
+| `en_core_web_md` | ~40 MB | Adds word vectors. |
+| `en_core_web_lg` | ~560 MB | Larger word vectors. |
+| `en_core_web_trf` | ~440 MB | Transformer-based. Highest accuracy. |
+
+We use `_sm` because:
+- We're not relying on spaCy for hard names — those go through the curated keyword pass.
+- Cold-start time matters. `--once` boots a process, loads the model, drains the queue, exits. Loading `_lg` would add 4-5 seconds per invocation.
+- `_trf` would need a GPU for reasonable throughput.
 
 If we ever needed higher PERSON/ORG recall we'd jump straight to `_trf` and pay the GPU cost rather than incrementally trying `_md` / `_lg`.
 
-### 3.3 "Process a column on `raw_posts`" vs "separate `processed_posts` table"
+### 3.3 Column on `raw_posts` vs separate `processed_posts` table
 
-Two ways to track Stage-3 progress over Stage-2 rows:
+Two ways to track Stage-3 progress:
 
-1. **Add `processed_at` to `raw_posts`** (what we did).
-2. **Create a `processed_posts(raw_post_id, processed_at)` join table.**
+1. **`processed_at` column on `raw_posts`** (what we did).
+2. **A `processed_posts(raw_post_id, processed_at)` join table.**
 
-(2) is more "normalised" and lets multiple downstream stages each track their own progress without fighting for a single column. (1) is simpler and reads better in queries.
+Option 2 is more "normalised" and lets multiple downstream stages each track their own progress without fighting for a single column. Option 1 is simpler.
 
-We picked (1) for now because there's only one downstream stage. When Stage 4 (LLM) and Stage 5 (MITRE mapping) come online, they'll each need their own progress tracking. At that point the right move is (2) — a single `post_processing_state` table keyed by `(raw_post_id, stage)` — and `processed_at` on `raw_posts` will be either kept as a fast-path "fully processed by the whole pipeline" denormalisation, or migrated away. Either is fine; the rewrite cost is small because the cursor logic is in one function (`_fetch_unprocessed`).
+We picked (1) for now because there's only one downstream stage. **Stage 4 will introduce a real `post_processing_state` table** (`(raw_post_id, stage, processed_at)`) and use that going forward — see Stage 4's LEARN doc when it lands.
 
-### 3.4 Why `dedupe()` and not just rely on the DB's UNIQUE
+### 3.4 Why `dedupe()` AND DB UNIQUE
 
-Already covered in §2.4: the DB's UNIQUE is correctness; `dedupe()` is performance. Both belong. The principle generalises — *correctness invariants belong in the database, performance optimisations belong in the application*.
+Already covered. DB UNIQUE is correctness; `dedupe()` is performance. Both belong.
 
 ### 3.5 Per-row `try/except` on inserts vs batch insert
 
-Same trade-off as Stage 2's scraper. Per-row `try/except` lets us count inserts vs duplicates accurately, at the cost of one Python-level exception per duplicate. At our scale (hundreds of inserts per batch), the cost is invisible. At hundreds of thousands per batch we'd switch to `INSERT … ON CONFLICT DO NOTHING` with `executemany` and read `cur.rowcount`.
+Same trade-off as Stage 2. Per-row gives accurate counts at our scale. At hundreds of thousands per batch we'd switch to `INSERT … ON CONFLICT DO NOTHING` with `executemany` and read `cur.rowcount`.
 
 ---
 
-## 4. Tech stack tour, with industry context
+## 4. Tech-stack tour, with industry context
 
-| Component                         | What it is                                                  | Where it shows up in industry                                                                                                                                                              |
-|-----------------------------------|--------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **spaCy**                         | Production-grade Python NLP library — tokenisation, POS, parsing, NER, lemmatisation, custom components. | Default NER stack at most CTI shops that don't have an LLM budget; backbone of `cyner` and other CTI-NER libraries. Also used in healthcare (medspaCy), legal, and financial NLP. |
-| **`en_core_web_sm`**              | spaCy's small English pipeline. CNN-based NER, no word vectors. ~12 MB. | The default pick for "I want NER, I don't want a model download for every dev." Bundled into countless `pip install`-only apps where a transformer-sized download would be unacceptable. |
-| **Python `re` module**            | Stdlib regex engine. Backtracking, non-fancy.                | Pervasive. Heavyweight pipelines move to `regex` (the third-party module with named groups + better unicode support) or hand-rolled finite-state machines (Hyperscan, Rust's `regex`) when throughput matters. For prose-volume IOC extraction, stdlib `re` is fine. |
-| **Defanging / refanging**         | Convention in CTI writing for non-clickable IOCs.            | Universal in incident reports, vendor blogs, ISAC sharing. Tools that don't refang miss most of the IOCs in human-written reports. CISA's automated indicator sharing (AIS) and OpenCTI both ship refanging passes. |
-| **Indicators of Compromise (IOCs)** | Atomic observables: IPs, domains, hashes, CVEs, BTC, etc.   | The fundamental currency of CTI. Stored in TAXII servers, MISP instances, OpenCTI, and every commercial threat intel platform. Standardised by STIX 2.1 (Stage 5 will touch this). |
-| **MITRE ATT&CK (referenced)**     | Knowledge base of adversary tactics, techniques, procedures. | The canonical taxonomy for "what did the attacker do." Stage 5 will ingest the JSON dump and cross-reference our extracted entities against threat-actor and malware names. Already referenced here because our `_THREAT_ACTOR_TERMS` and `_MALWARE_TERMS` lists shadow ATT&CK's intrusion-sets and software corpora. |
-| **STIX 2.1 (referenced)**         | Structured Threat Information Expression — JSON schema for indicators, campaigns, intrusion-sets, etc. | The lingua franca for sharing threat intel between organisations. Our `iocs` table is essentially a flattened subset of STIX's `indicator` SDO; in Stage 6 we'll consider exposing a STIX-shaped API. |
-| **SQLite UNIQUE + ON DELETE CASCADE** | Referential integrity and dedup at the storage layer.    | The pattern any real ETL pipeline uses. Snowflake/BigQuery/Postgres all have equivalents. The reason: extraction is rerun frequently (model updates, regex updates, bug fixes), and idempotency must be a property of the storage, not of the application. |
-| **`PRAGMA table_info` + guarded ALTER TABLE** | SQLite's idiom for "additive migrations without a migration tool." | Used in any single-file SQLite app that has shipped multiple versions — Firefox bookmarks, Apple's CoreData backing stores, hundreds of Electron apps. The "real" answer is alembic / yoyo / liquibase, but you don't need it until you do. |
-| **Ollama / Mistral (Stage 4 preview)** | Local LLM runner + model weights.                       | Stage 4 will use this to do summarisation and MITRE technique inference. Mentioned here only because Stage 3's design (regex for atoms, LLM for narrative) is the standard division of labour in modern CTI extraction stacks. |
+| Component | What it is | Where it shows up in industry |
+|---|---|---|
+| **spaCy** | Production-grade Python NLP library. Tokenisation, POS, parsing, NER, lemmatisation, custom components. | Default NER stack at most CTI shops without an LLM budget. Backbone of `cyner` and other CTI-NER libraries. Also used in healthcare (medspaCy), legal NLP, and financial NLP. |
+| **`en_core_web_sm`** | spaCy's small English pipeline. CNN-based NER, no word vectors. | The default pick for "I want NER without a 500MB model download." Bundled into countless `pip install`-only apps. |
+| **Python `re`** | Stdlib regex engine. Backtracking, no fancy features. | Pervasive. Heavyweight pipelines move to `regex` (third-party module with named groups + better Unicode) or hand-rolled FSMs (Hyperscan, Rust's `regex` crate) when throughput matters. For prose-volume IOC extraction, stdlib `re` is fine. |
+| **Defanging / refanging** | Convention in CTI writing for non-clickable IOCs. | Universal in incident reports, vendor blogs, ISAC sharing. CISA's automated indicator sharing (AIS) and OpenCTI both ship refanging passes. |
+| **Indicators of Compromise (IOCs)** | Atomic observables: IPs, domains, hashes, CVEs, BTC, etc. | The fundamental currency of CTI. Stored in TAXII servers, MISP instances, OpenCTI, every commercial threat-intel platform. Standardised by STIX 2.1 (Stage 5 will touch this). |
+| **MITRE ATT&CK (referenced)** | Knowledge base of adversary tactics, techniques, procedures. | The canonical taxonomy for "what did the attacker do." Stage 5 will ingest the JSON dump and cross-reference our extracted entities against threat-actor + malware names. |
+| **STIX 2.1 (referenced)** | JSON schema for indicators, campaigns, intrusion-sets, etc. | The lingua franca for CTI sharing. Our `iocs` table is essentially a flattened subset of STIX's `indicator` SDO. |
+| **SQLite UNIQUE + ON DELETE CASCADE** | Referential integrity + dedup at the storage layer. | The pattern any real ETL pipeline uses. Snowflake/BigQuery/Postgres all have equivalents. The reason: extraction is rerun frequently, and idempotency must be a property of *storage*, not application. |
+| **`PRAGMA table_info` + guarded `ALTER TABLE`** | SQLite's idiom for "additive migrations without a real migration tool." | Used in any single-file SQLite app that ships multiple versions: Firefox bookmarks, Apple's CoreData, hundreds of Electron apps. The "real" answer is alembic / yoyo / liquibase, but you don't need it until you do. |
+| **Ollama / Mistral (Stage 4 preview)** | Local LLM runner + model weights. | Stage 4's tool. Mentioned only because Stage 3's design (regex for atoms, LLM for narrative) is the standard division of labour in modern CTI extraction stacks. |
 
 ---
 
-## 5. The `processed_at` column story, in detail
+## 5. The `processed_at` migration story, in detail
 
-This burned a few minutes of my time during the build, and the resolution is documented in CLAUDE.md §3 ("Schema additions … added via guarded `ALTER TABLE`"). Worth one full pass.
+This burned a few minutes during the build. Worth a focused pass because it generalises.
 
-**The problem.** SQLite supports `CREATE TABLE IF NOT EXISTS` but not `ALTER TABLE … ADD COLUMN IF NOT EXISTS`. Editing `schema.sql` to add `processed_at` to the `raw_posts` `CREATE TABLE` block looks like the obvious fix. It isn't:
+#### The problem
 
-- For a fresh DB, `CREATE TABLE` runs and the column is there.
-- For an existing DB (Stage 2's `sentinelx.db`), `CREATE TABLE IF NOT EXISTS` is a no-op — the table already exists, so the new column definition is silently ignored. There's no error; there's no warning. The column never appears.
+SQLite supports `CREATE TABLE IF NOT EXISTS` but not `ALTER TABLE … ADD COLUMN IF NOT EXISTS`. Editing `schema.sql` to add the column to the `raw_posts` `CREATE TABLE` block looks like the obvious fix. It isn't:
 
-You'd then run Stage 3 against the existing DB and get `OperationalError: no such column: processed_at`, far away from where the bug actually lives.
+- For a fresh DB: `CREATE TABLE` runs, column appears.
+- For an existing DB: `CREATE TABLE IF NOT EXISTS` is a no-op — table already exists, new column definition silently ignored. **No error. No warning.** Stage 3 then crashes at runtime with `OperationalError: no such column: processed_at`, far away from where the bug is.
 
-**Three ways to handle it:**
+#### Three ways to handle it
 
-1. **`ALTER TABLE` in `schema.sql`, blindly.** Re-running schema.sql on a DB that already has the column raises `OperationalError: duplicate column name`. Doesn't survive a second invocation. Wrong.
+1. **Blind `ALTER TABLE` in `schema.sql`.** Re-running on a DB that already has the column raises `OperationalError: duplicate column name`. Doesn't survive a second invocation. Wrong.
 2. **Drop and recreate `raw_posts`.** Wipes user data. Categorically wrong.
-3. **Read `PRAGMA table_info`, conditionally `ALTER TABLE`.** What we did. Idempotent, preserves data, runs on every `Store` instantiation so the migration happens transparently the first time the upgraded code touches an old DB.
+3. **Read `PRAGMA table_info`, conditionally `ALTER TABLE`.** What we did. Idempotent, preserves data, runs transparently on first contact.
 
-**The longer-term answer** is a migration tool — `alembic` (used widely in the SQLAlchemy world, supports SQLite), `yoyo-migrations` (lightweight, SQL-first), or hand-rolling a numbered migration directory + a `schema_migrations` table. Any of those becomes worth the dependency around the third or fourth schema change. Until then, the four-line guard in `_init_schema` is appropriate.
+#### The longer-term answer
 
-This pattern — *read the current schema state, take the minimum action needed* — is also how production migration tools work under the hood. They store applied-migration ids in a `schema_migrations` table and skip ones that already ran. The four-line guard is the same idea, scoped down to a single column.
+A proper migration tool — `alembic`, `yoyo-migrations`, or hand-rolling a numbered migration directory + a `schema_migrations` table. Worth the dependency around the third or fourth schema change. Until then, the four-line guard is the right level.
+
+This pattern — *read the current schema state, take the minimum action needed* — is also how production migration tools work under the hood. They store applied-migration IDs in a table and skip ones that already ran. Same idea, scoped to one column.
 
 ---
 
@@ -511,29 +675,29 @@ This pattern — *read the current schema state, take the minimum action needed*
 
 Things deliberately not built now:
 
-- **More IOC types.** No file paths, no registry keys, no Yara rules, no JA3/JA4 fingerprints, no User-Agent strings, no MAC addresses, no ASN numbers. All of those are real CTI signal. Each is a 5-minute regex addition; we'll add them on demand as Stages 5–7 surface use cases.
-- **Whitelisting.** A regex that matches `8.8.8.8` is technically correct but probably not interesting (it's Google DNS). Same for RFC-1918 private ranges, CDN domains, and obvious test values like `example.com`. Real systems maintain a whitelist of "uninteresting" matches and either drop them or flag them. We don't yet; we'll add `iocs.is_noise` (boolean, computed at insert) when it becomes painful.
-- **Confidence scores.** Right now an IOC row has no notion of confidence — every match is treated equally. In real systems, a match within a quoted code block might be `confidence=0.95` while a match in marketing copy might be `confidence=0.3`. spaCy entity confidence is already available (`ent._.score` with the right config); regex matches would need a heuristic. Defer until Stage 4's LLM pass, which has its own probability outputs.
-- **Replace curated MALWARE/THREAT_ACTOR sets with MITRE-derived ones.** Stage 5 ingests the MITRE STIX bundle, which contains the canonical name + alias list for every documented intrusion-set and malware family. Once that's in the DB, the keyword pass becomes a `LIKE` join against that table and the recall jumps roughly 100×. This is the single biggest planned upgrade to Stage 3.
-- **Stop accumulating spans into a Python list inside `_overlaps`.** Profile, then maybe an interval tree. Premature now; flag if a future post is 100KB long.
-- **Per-IOC-type extraction toggles.** A CLI flag like `--no-domain` to disable domain extraction for a run, useful when debugging false positives. One-line addition; deferred.
-- **Fine-tuning spaCy.** Eventually we'll have enough labelled CTI data (from Stages 4 and 5's LLM outputs) to fine-tune a custom NER model. That's months away.
+- **More IOC types.** No file paths, no registry keys, no Yara rules, no JA3/JA4 fingerprints, no User-Agent strings, no MAC addresses, no ASN numbers. All real CTI signal. Each is a 5-minute regex addition on demand.
+- **Whitelisting.** A regex match for `8.8.8.8` (Google DNS) is technically correct but uninteresting. Same for RFC-1918 private ranges, CDN domains, obvious test values like `example.com`. Real systems maintain a whitelist and either drop or flag matches. Add `iocs.is_noise` (boolean, computed at insert) when it becomes painful.
+- **Confidence scores.** Right now an IOC has no confidence — every match is treated equally. Real systems weight matches differently (a match in a quoted code block vs in marketing copy). Defer until Stage 4's LLM pass.
+- **Replace curated MALWARE/THREAT_ACTOR sets with MITRE-derived ones.** Stage 5 lands the canonical name+alias list. Once it's in the DB, the keyword pass becomes a `LIKE` join. Recall jumps roughly 100×. **Biggest single planned improvement.**
+- **Interval tree for `_overlaps`.** Profile, then maybe. Premature now.
+- **Per-IOC-type extraction toggles.** A CLI flag like `--no-domain` for debugging false positives. One-line addition; deferred.
+- **Fine-tuning spaCy.** Eventually we'll have enough labelled CTI data (from Stages 4+5) to fine-tune a custom NER model. Months away.
 
-None of those are needed for Stage 4. The contract Stage 3 publishes — *immutable rows in `iocs` and `entities` keyed by `raw_post_id`* — is exactly what the LLM pipeline wants to consume.
+None of these block Stage 4. The contract Stage 3 publishes — *immutable rows in `iocs` and `entities` keyed by `raw_post_id`* — is what the LLM pipeline wants.
 
 ---
 
 ## 7. Hand-off contract to Stage 4
 
-Stage 4 will run an LLM (Mistral via Ollama, four-stage prompt chain) over `raw_posts` to produce summaries, MITRE technique mappings, intent classifications, and target-industry tags. To make Stage 3's contract explicit:
+Stage 4 runs an LLM over `raw_posts` to produce summaries, MITRE technique mappings, intent classifications, and target-industry tags. To make Stage 3's contract explicit:
 
-- **Input tables for Stage 4:** `raw_posts` (immutable), `iocs` (immutable per `(raw_post_id, ioc_type, value)`), `entities` (immutable per `(raw_post_id, label, text)`).
-- **Join key for all three:** `raw_posts.id`. Do not use `source_post_id`.
-- **Idempotency:** all three tables are append-only from Stage 4's perspective. Re-running Stage 3 over a post produces no new rows (UNIQUE constraints) so Stage 4 can rely on extraction results being stable across pipeline reruns.
-- **Cursor for Stage 4:** Stage 4 will track *its own* state, separate from `raw_posts.processed_at`. As discussed in §3.3, the right design is a `post_processing_state(raw_post_id, stage, processed_at)` table once we have multiple downstream stages. We'll add it in Stage 4 rather than retrofit it now.
-- **What Stage 4 does NOT need to do:** it does not need to refang the body, re-extract IOCs, or guess at named entities. Those facts are already available as joined rows. The LLM prompt should *include* those structured facts as context, not re-derive them.
+- **Input tables:** `raw_posts`, `iocs`, `entities`. All immutable from Stage 4's perspective.
+- **Join key:** `raw_posts.id`. NOT `source_post_id`.
+- **Idempotency:** all three tables append-only from Stage 4's view. Re-running Stage 3 produces no new rows (UNIQUE constraints). Stage 4 can rely on extraction results being stable across reruns.
+- **Cursor for Stage 4:** Stage 4 will track its own state, separate from `raw_posts.processed_at`. It introduces a `post_processing_state(raw_post_id, stage, processed_at)` table that future stages will reuse.
+- **What Stage 4 does NOT do:** does not refang the body, does not re-extract IOCs, does not guess at named entities. Those facts are already in joined rows. **The LLM prompt should *include* those structured facts as context, not re-derive them.**
 
-This is the same shape as the Stage-2-to-Stage-3 handoff: *immutable upstream layer, downstream stage with its own cursor, append-only outputs*. As covered at the end of Stage 2's LEARN doc, that pattern (Kafka offsets, dbt models, Airflow XCom) is the standard composition rule for staged ETL pipelines. You're not learning a quirk of this project; you're seeing the shape repeat.
+Same shape as the Stage-2-to-Stage-3 handoff: *immutable upstream layer, downstream stage with its own cursor, append-only outputs*. As covered at the end of Stage 2's LEARN doc, that pattern (Kafka, dbt, Airflow) is the standard composition rule for staged pipelines.
 
 ---
 
@@ -546,7 +710,7 @@ backend/.venv/Scripts/python.exe -m backend.pipeline.run --once
 # Continuous (Ctrl-C to stop)
 backend/.venv/Scripts/python.exe -m backend.pipeline.run --watch --interval 30
 
-# Wipe Stage 3 outputs and re-extract from scratch
+# Wipe Stage 3 outputs and re-extract
 backend/.venv/Scripts/python.exe -m backend.pipeline.run --reset
 backend/.venv/Scripts/python.exe -m backend.pipeline.run --once
 
@@ -563,4 +727,18 @@ sqlite3 backend/db/sentinelx.db \
 
 ---
 
-**End of STAGE_03_LEARN.** Stage 3 is now closed: code verified working end-to-end, this LEARN doc shipped. Per CLAUDE.md §5, the remaining checklist item is the git commit, which is deferred to the user's explicit say-so.
+## 9. The five things to actually remember
+
+1. **Two parallel tables (`iocs` + `entities`), not one polymorphic one.** Different keys, different consumers, different downstream queries. Don't conflate fact types.
+
+2. **Refang into a working copy, NEVER mutate the original body.** Analysts viewing the raw post should see what the author wrote. Extraction sees the live form. Two views, one source of truth.
+
+3. **Order matters in regex extraction.** URLs before domains. Longer hashes before shorter ones. The `_overlaps` filter is what makes "match longest first" actually work. Get the order wrong and you get triple-counted hashes or duplicate domain rows.
+
+4. **DB UNIQUE = correctness; `dedupe()` = performance.** Both belong. Don't skip the DB constraint just because the application dedupes — the constraint is what protects you from process crashes mid-batch.
+
+5. **The `PRAGMA table_info` + guarded `ALTER TABLE` pattern is your migration scaffolding** until the project graduates to a real migration tool. It's also how the real tools work under the hood: read state, take minimum action.
+
+---
+
+**End of Stage 3 LEARN.** Stage 4 (local LLM via Ollama/Mistral, 4-prompt chain) is the next layer up: takes `raw_posts` + `iocs` + `entities` and produces summaries, intent labels, target profiles, and MITRE technique candidates. The LEARN doc for that lands shortly.

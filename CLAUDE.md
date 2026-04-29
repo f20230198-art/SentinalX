@@ -37,7 +37,7 @@ This preference is also persisted in user-level memory (`feedback_learning_style
 
 ## 3. Project status — keep this section current
 
-**Last updated:** 2026-04-29 (Stage 3 closed: code verified + STAGE_03_LEARN.md shipped)
+**Last updated:** 2026-04-29 (**Stage 4 closed.** Code verified twice (sync + async, 235/235 each). All four LEARN docs (`STAGE_01_LEARN.md` through `STAGE_04_LEARN.md`) rewritten/written in the friendlier voice. Stage 5 next on user go-ahead.)
 
 ### Stages (8 total)
 
@@ -46,7 +46,7 @@ This preference is also persisted in user-level memory (`feedback_learning_style
 | 1 | Synthetic .onion forum + Tor      | ✅ complete   | ✅ `STAGE_01_LEARN.md`    |
 | 2 | Tor scraper + dedup + raw_posts   | ✅ complete   | ✅ `STAGE_02_LEARN.md`    |
 | 3 | NER + IOC extraction (spaCy + regex) | ✅ complete   | ✅ `STAGE_03_LEARN.md`    |
-| 4 | Local LLM pipeline (Ollama/Mistral, 4 stages) | ⬜  | —                        |
+| 4 | Local LLM pipeline (Ollama/Mistral, 4 stages) | ✅ complete   | ✅ `STAGE_04_LEARN.md`    |
 | 5 | MITRE ATT&CK ingest + vector index | ⬜            | —                        |
 | 6 | FastAPI backend                   | ⬜             | —                        |
 | 7 | React/Vite/Tailwind frontend      | ⬜             | —                        |
@@ -73,11 +73,31 @@ This preference is also persisted in user-level memory (`feedback_learning_style
   - Idempotent: `UNIQUE(raw_post_id, ioc_type, value)` and `UNIQUE(raw_post_id, label, text)` guarantee re-extraction is safe.
   - CLI: `--once` (drains all unprocessed; default), `--watch --interval N`, `--reset` (wipes extractions + clears `processed_at`).
   - **Verified 2026-04-27:** processed 235/235 posts → 176 IOCs (53 ipv4, 43 cve, 36 btc, 21 domain, 14 email, 9 sha256) + 239 entities (86 ORG, 50 PERSON, 24 NORP, 23 MALWARE, 21 PRODUCT, 20 GPE, 13 THREAT_ACTOR, 1 EVENT, 1 LOC). Second run = no-op (processed=0).
+- **Stage 4 LLM pipeline** (`backend/.venv/Scripts/python.exe -m backend.llm.run --once`):
+  - Local Ollama (host port 11434), `mistral:latest` 7B running 100% on the user's RTX 4060 (~5.1 GB VRAM).
+  - 4-prompt chain per post: `summary` (free text) → `intent` (JSON, one of sale/recruitment/how-to/doxxing/discussion/other) → `targets` (JSON: industries/geographies/victim_types) → `techniques` (JSON: MITRE T-codes + behaviour notes). Each prompt receives the post body **plus** Stage-3 IOCs/entities as a `KNOWN FACTS` block so the LLM doesn't re-derive what we already have. Body clipped to 4000 chars; JSON outputs use Ollama `format=json` plus a fallback `{...}` regex extractor in `chain._extract_json` for the cases Mistral wraps JSON in prose.
+  - Schema additions: `llm_analyses` (one row per post, `UNIQUE(raw_post_id)`, `ON CONFLICT DO UPDATE`), `post_processing_state(raw_post_id, stage, processed_at)` (per-stage cursor table — replaces the "extra column on raw_posts" pattern; Stage 5+ will reuse it), `llm_runs` audit log.
+  - Cursor: posts where `raw_posts.processed_at IS NOT NULL` (Stage 3 done) AND not yet present in `post_processing_state` for stage `'llm'`. Stage 4 owns its own cursor — does NOT share Stage 3's `processed_at`.
+  - CLI: `--once` (default, drains until partial batch), `--watch --interval N`, `--reset` (drops llm tables + clears stage='llm' rows). `--limit N` for smoke tests; `--model NAME` to swap models; `--batch N` for `llm_runs` row granularity.
+  - **Verified 2026-04-29 (sync, sequential prompts):** drained 235/235 posts in 1979s (~33.0 min, ~8.42s/post on RTX 4060). Zero failures, zero NULL fields. Intent distribution: discussion=111, sale=92, other=17, recruitment=13, doxxing=2.
+  - **Verified 2026-04-29 (async, concurrency=2 + 4-prompt fanout via `asyncio.gather`):** drained 235/235 posts in 1837s (~30.6 min, ~7.82s/post). **Honest result: 1.08x speedup.** Reason: a 7B model on a single 4060 is compute-bound, not latency-bound — there is no idle GPU for parallel requests to fill. Concurrency=4 was actually *worse* (~9s/post on 8-post sample) because too many in-flight prompts starve each other. The async refactor still helps the **live `--watch` demo path** (per-post latency drops from ~8-12s to ~6-8s because the 4 prompts within one post overlap), but it's not the 3-4x batch speedup originally hoped for. Defaults: `--concurrency 2` (set in `run.py`).
 
 ### What is NOT yet done
 
-- No git commit has been made for Stage 2 or Stage 3 yet. User commits explicitly (CLAUDE.md §8).
-- Stage 4 — local LLM pipeline via Ollama/Mistral (4-stage prompt chain). Do NOT start without explicit user go-ahead. It will read from `raw_posts` + `iocs` + `entities` and own its own per-stage cursor (likely a new `post_processing_state(raw_post_id, stage, processed_at)` table — see `STAGE_03_LEARN.md` §3.3 / §7).
+- All four LEARN docs (Stages 1–4) shipped in the friendlier voice on 2026-04-29 and the user signed off on Stage 1's voice as the template. If they ask for further voice tweaks, apply the same change uniformly across all four.
+- No git commit has been made for Stage 2 / 3 / 4 / async-refactor / LEARN-rewrites yet beyond the existing `82470de stage 3` commit. User commits explicitly (CLAUDE.md §8).
+- Stage 5 — MITRE ATT&CK ingest + vector index. Will verify the *candidate* technique IDs Stage 4 emits in `llm_analyses.techniques_json` against the official MITRE corpus via embedding similarity, and use embeddings to find techniques the LLM *missed* by searching post bodies semantically against MITRE technique descriptions. Do NOT start without explicit user go-ahead.
+
+### Performance ceiling for Stage 4 (so the next session doesn't re-attempt async)
+
+The async refactor (committed in `backend/llm/{client.py,chain.py,run.py}` 2026-04-29) only buys 1.08x on the user's 4060. **Do not re-attempt async-side gains** — the GPU is the bottleneck. Real Stage-4 speedups now require either:
+- Swapping to a smaller model (`phi3:mini`, `qwen2.5:3b`) — `--model` flag already supports this; ~2-3x faster, slight quality drop. Worth offering as a `--fast` mode for live demos.
+- A bigger GPU. Not a software lever.
+- Streaming the summary prompt and showing partial output in the UI — *might* be worth it for Stage 7's UX, not for batch throughput.
+
+### Demo plan (for context, not built yet)
+
+The user wants the demo to feel real — *not faked, not pre-baked theatre*. Strategy: run all stages in `--watch` mode in separate terminals. User posts a new thread on the live `.onion` forum during the demo; within ~60-90s (after concurrency refactor: ~30s) it appears fully enriched in the Stage-7 dashboard. The pre-existing 235 analysed rows serve as the "historical archive" so the dashboard isn't empty. Every output is genuinely produced by the pipeline at demo time — no canned responses.
 
 ---
 

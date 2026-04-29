@@ -4,7 +4,161 @@ Append a new dated entry every time a stage advances, a blocker is hit, or a non
 
 ---
 
-## 2026-04-29 (latest) — Stage 3 closed: STAGE_03_LEARN.md shipped
+## 2026-04-29 (latest) — Stage 4 closed: STAGE_02/03/04_LEARN.md shipped in friendlier voice
+
+**Done in this session:**
+- Wrote `STAGE_02_LEARN.md` and `STAGE_03_LEARN.md` from scratch in the new friendlier voice (matching the Stage 1 template the user signed off on earlier today). Every technical point from the prior versions preserved — file-by-file walkthroughs, decision rationales, tech-stack tour with industry context, gotchas, hand-off contracts. Voice changes:
+  - Quick orientation paragraph at the top so the reader knows what the stage is *for* before diving in.
+  - Jargon unpacked inline the first time it appears (cursor, idempotent, context manager, dataclass, NER, sans-IO, B-tree, upsert, etc.).
+  - "Detour" boxes for opt-in one-level-deeper questions.
+  - "Try this now" boxes at natural pause points with concrete `sqlite3` queries the user can run against the live DB.
+  - Bug-bounty / pentest framing pinned to specific concepts when natural (server-side validation as dedup, regex permissiveness as input-validation bug parallel, prompt injection as the LLM-era XSS, state drift as race-condition family, DNS leaks as OPSEC failure).
+  - "Five things to actually remember" closing section that's framed as actionable takeaways, not a recap.
+- **Wrote `STAGE_04_LEARN.md` from scratch** in the same voice. Sections: mental model (deterministic vs probabilistic stages), file walkthrough (`schema.sql`, `client.py`, `prompts.py`, `chain.py`, `run.py`), the 4-prompt design with line-level commentary on each, `_extract_json` fallback story, async fanout with `asyncio.gather` + Semaphore, the persistence upsert pattern, decision rationales (Local Mistral vs OpenAI/Claude — privacy is the load-bearing argument; Mistral 7B vs phi3-mini vs llama3-8b vs the 70b+ models that don't fit; storing JSON-as-text vs normalising; sync within a post vs async fanout), tech-stack tour with industry context, **a focused "honest" section on the async speedup story** explaining exactly why we got 1.08× instead of the 3-4× I hoped for (GPU is compute-bound on a single 4060 with a 7B model; verified via `ollama ps` reporting 100% GPU), where Stage 4 will be revisited (streaming, prompt versioning, confidence calibration, refusal handling, cost tracking, prompt-injection defence — flagged as the LLM-era XSS), explicit hand-off to Stage 5.
+- Updated `CLAUDE.md` §3: Stage 4 row → ✅ complete / ✅ LEARN. Header date stays 2026-04-29. "What is NOT yet done" updated to reflect Stage 4 closure.
+
+**Stage exit checklist for Stage 4 (per CLAUDE.md §5):**
+- [x] Code works end-to-end (verified twice — sync 33.0 min and async 30.6 min, both 235/235 zero failures).
+- [x] `STAGE_04_LEARN.md` written at repo root, exhaustive coverage in the friendlier voice.
+- [x] `CLAUDE.md` §3 updated.
+- [x] `PROGRESS.md` has this entry.
+- [ ] Git commit — **deferred to user**.
+
+**LEARN-doc voice cheat sheet** (so future sessions can match it):
+1. Top: 1-paragraph "Quick orientation" describing the whole stage in plain language.
+2. §0: "Mental model" + a 4-row pressures-table (the canonical CTI-stage shape).
+3. File map first, then file-by-file walkthrough, longest at the heart of the stage.
+4. Inline-unpack the first occurrence of jargon. **Detour** boxes for opt-in depth (PRAGMA, idempotent, context manager, B-tree, sans-IO, NER, async-vs-sync, upsert).
+5. **Try this now** boxes at natural pause points — usually a `sqlite3` one-liner against the live DB.
+6. Pentest framing where natural — Burp / HackerOne / OWASP analogies. The user has solid web-vuln intuition; lean into it.
+7. §4: decision table "what we picked vs alternatives we didn't."
+8. §5: tech-stack tour with industry context — "where does each piece show up at real CTI shops / dbt / Airflow / Postgres / etc."
+9. Gotchas / dedicated focused sections for one-time deep dives (Stage 1's setpriv pattern; Stage 2's `socks5h://` story; Stage 3's PRAGMA-table-info migration; Stage 4's GPU-bottleneck honesty section).
+10. Final "Five things to actually remember" section. Framed as takeaways the reader could state aloud.
+
+**Handoff for next Claude:**
+- Read CLAUDE.md (auto-loaded). Status reflects this entry. Stages 1–4 are now fully closed.
+- **Stage 5 is next:** MITRE ATT&CK ingest + vector index. Do NOT start without explicit user go-ahead.
+- The user has an RTX 4060 and Ollama installed — the LLM stack is GPU-accelerated. CLAUDE.md "Performance ceiling" note is still relevant.
+- Do NOT auto-commit. The user has not asked for a commit since the `82470de stage 3` one.
+- If the user wants more voice tweaks across the LEARN docs, apply the same change uniformly to all four. The voice cheat sheet above is the rubric.
+
+---
+
+## 2026-04-29 — Stage 4 async refactor + STAGE_01_LEARN.md rewrite (friendlier voice)
+
+**Built:**
+- **`AsyncOllamaClient`** added to `backend/llm/client.py` — sibling of `OllamaClient` backed by `httpx.AsyncClient`. Same surface, same defaults. Body-builder logic factored into a private `_build_body()` shared between sync and async paths.
+- **`chain.analyse_post_async`** — fans out the 4 prompts via `asyncio.gather`. Single-task per prompt via `_run_one`; `_PROMPT_SPECS` tuple keeps the (name, builder, json_mode, num_predict) config in one place. The sync `analyse_post` is preserved as a public API but no longer used by `run.py`.
+- **`run.py` rewritten to drive an async loop:** `_amain()` is the asyncio coroutine; `main()` calls `asyncio.run(_amain(...))`. New helpers `_analyse_one`, `process_batch_async`, `run_once_async`, `run_watch_async`. `--concurrency N` flag controls how many posts are in-flight at once via an `asyncio.Semaphore` — peak in-flight Ollama requests = concurrency × 4. Default 2.
+- DB-side concurrency notes: I pre-fetch IOCs+entities for all batch rows on the sync sqlite3 connection *before* spawning tasks, so coroutines never touch sqlite concurrently. `_persist` runs back on the main loop after each completed `as_completed` future. The schema is already concurrency-safe (`llm_analyses.UNIQUE(raw_post_id)` + the `ON CONFLICT DO UPDATE` upsert in `_persist`).
+
+**Benched (full 235-post drain, both runs zero failures, zero NULL fields):**
+
+| Setup                                   | Wall-clock | s/post | Speedup |
+|-----------------------------------------|------------|--------|---------|
+| Sync (sequential prompts)               | 1979s (33.0 min) | 8.42 | baseline |
+| Async, concurrency=2, 4-prompt gather   | 1837s (30.6 min) | 7.82 | **1.08x** |
+| Async, concurrency=4 (smoke, 8 posts)   | 73s for 8 | 9.1 | *worse* |
+
+**Honest assessment: the async refactor barely moved the needle.** Cause is hardware-side, not code-side. A 7B model loaded into a single 4060's 8 GB VRAM saturates the GPU on a *single* request — `ollama ps` reports `100% GPU` while one prompt is generating. There is no idle compute for parallel requests to fill, so adding concurrency just makes prompts queue and stretch each other's latency. Concurrency=4 was actively worse: too many big prompts in flight starve each other on the same GPU.
+
+**The async work is still worth keeping** for two reasons:
+1. **Live `--watch` demo path:** per-post latency drops from ~8-12s sequential to ~6-8s because the 4 prompts within one post overlap (the cheap intent prompt finishes while the longer summary is still generating). User-perceived snappiness is what matters here, not batch throughput.
+2. **Future-proofing:** if the user ever moves to a multi-GPU box or a smaller model, the async path will scale; sync wouldn't.
+
+**The CLAUDE.md §3 "Performance ceiling" note** explicitly tells future sessions not to re-attempt async-side gains. Future Stage-4 wins must come from a smaller model (`phi3:mini`, `qwen2.5:3b` — already supported via `--model` flag), a bigger GPU, or response streaming for the summary prompt.
+
+**Also done in this session — `STAGE_01_LEARN.md` rewrite (friendlier voice):**
+
+User asked for a tone change across all LEARN docs: same technical depth, but jargon unpacked inline, optional "Detour" boxes for one-level-deeper questions, hands-on "Try this" boxes at natural pause points, and bug-bounty framing where it helps (the user has solid web-vuln intuition from Burp/HackerOne practice but limited prod-codebase reading time, almost zero hands-on Python practice — described their work as "vibecoded" with conceptual clarity but weak muscle memory).
+
+I rewrote `STAGE_01_LEARN.md` end-to-end as the template for the rewrite voice. Specific structural changes from the original:
+- A 1-paragraph "Quick orientation" at the very top so the reader knows what the whole stage is *for* before diving in.
+- Section §0 ("What you can do right now") got a "Try this now" box with `cat tor_config/hidden_service/hostname` + `docker ps`.
+- Jargon inline-unpacks: PRAGMA, loopback, WSGI vs ASGI, what an index actually is (B-tree analogy + phonebook framing), bind mount vs named volume side-by-side table, why `exec` matters for SIGTERM, etc.
+- Bug-bounty framing pinned to specific concepts: Jinja's autoescape vs XSS, `<int:thread_id>` URL converter vs IDOR, privilege dropping vs sudoers, "stealing the keypair = impersonating the .onion" linked back to keypair-as-identity intuition.
+- "Try this" boxes added to: §0 (cat hostname / docker ps), §3.1 (curl through SOCKS5 inside the tor container), §3.7 (down -v vs hidden_service persistence demonstration).
+- "Detour" boxes for opt-in depth: PRAGMA, loopback, WSGI vs ASGI, why-not-`USER`-debian-tor in Dockerfile.
+- "Five things to remember" closing section that's framed as actionable takeaways, not a recap.
+- No depth was cut. The §4 decision table, §5 tech-stack tour with industry context, §6 CTI-shop mapping, §7 gotchas, §8 Stage-2 preview are all still there. Only the *voice* changed.
+
+**User has not yet read the rewritten Stage 1.** Awaiting feedback on whether the voice works before doing 02/03/04. If they want adjustments, the same adjustments will be applied across all four.
+
+**Stage exit checklist (per CLAUDE.md §5):**
+- [x] Code works end-to-end (verified twice — sync and async, 235/235 each, zero failures).
+- [ ] `STAGE_04_LEARN.md` written at repo root — pending (in the new voice, after user signs off on Stage 1 rewrite).
+- [x] `CLAUDE.md` §3 updated.
+- [x] `PROGRESS.md` has this entry.
+- [ ] Git commit — **deferred to user**.
+
+**Handoff for next Claude:**
+- Read CLAUDE.md (auto-loaded). Status reflects this entry.
+- **Do not re-attempt async-side speedups for Stage 4.** The CLAUDE.md "Performance ceiling" note explains why. If the user asks for faster Stage 4, the answer is `--model phi3:mini` or `qwen2.5:3b` (already supported), not more concurrency.
+- **First task on resume:** wait for the user's feedback on the rewritten `STAGE_01_LEARN.md`. If they like the voice, apply the same treatment to `STAGE_02_LEARN.md` and `STAGE_03_LEARN.md`, then write `STAGE_04_LEARN.md` from scratch in that voice.
+- The async code is in `backend/llm/{client.py, chain.py, run.py}`. The sync `analyse_post` is still public API but unused by `run.py`. If anyone wonders why it's still there: it's the simpler reference implementation for STAGE_04_LEARN.md to walk through before the async overlay.
+- Stage 5 (MITRE ATT&CK ingest + vector index) is next. Do NOT start without explicit user go-ahead.
+
+---
+
+## 2026-04-29 — Stage 4 LLM pipeline code complete + verified end-to-end on 235/235 posts
+
+**Built:**
+- `backend/llm/` package — `client.py` (thin Ollama HTTP wrapper, no `ollama` Python pkg dep), `prompts.py` (4 prompt templates with shared facts-block formatter and 4000-char body clip), `chain.py` (4-prompt orchestrator, `_extract_json` fallback for Mistral's occasional prose-around-JSON), `run.py` (CLI mirroring Stage 2/3 conventions: `--once` / `--watch` / `--reset`, plus `--limit` / `--model` / `--batch`).
+- Schema additions in `backend/db/schema.sql`:
+  - `llm_analyses(raw_post_id UNIQUE, summary, intent, targets_json, techniques_json, model, analysed_at, raw_responses)` with `ON CONFLICT(raw_post_id) DO UPDATE` upsert in `run._persist` so re-analysis is idempotent. FK to `raw_posts(id) ON DELETE CASCADE`.
+  - `post_processing_state(raw_post_id, stage, processed_at)` — per-stage cursor table, primary-keyed on `(raw_post_id, stage)`. This is the design called out in `STAGE_03_LEARN.md` §3.3 / §7; Stages 5+ will reuse it instead of growing more columns on `raw_posts`.
+  - `llm_runs` audit log mirroring `scraper_runs` / `extraction_runs`.
+- Cursor: `WHERE raw_posts.processed_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM post_processing_state WHERE stage = 'llm' AND raw_post_id = rp.id)`. Stage 4 owns its own cursor; Stage 3's `processed_at` is read-only from here.
+- 4-prompt chain:
+  1. **Summary** — free text, `format` omitted, 400 num_predict.
+  2. **Intent** — JSON `{intent, confidence, reason}`, single label from `[sale, recruitment, how-to, doxxing, discussion, other]`. `format=json`, 200 num_predict.
+  3. **Targets** — JSON `{industries, geographies, victim_types}`. `format=json`, 300 num_predict.
+  4. **Techniques** — JSON `{techniques: [{id, name, evidence}], behaviour: [...]}`, MITRE T-codes as candidates only (Stage 5 will verify). `format=json`, 500 num_predict.
+- Each prompt receives a `KNOWN FACTS` block built from Stage-3 IOCs + entities (grouped by type/label, deduped, sorted) so the LLM doesn't waste tokens re-deriving atoms we already have ground truth for.
+
+**Verified end-to-end (2026-04-29):**
+1. **Smoke test:** `python -m backend.llm.run --once --limit 2` — both posts succeeded, 25.2s + 9.6s wall-clock, summaries coherent, JSON parses cleanly, audit + state rows correct.
+2. **Full corpus drain:** `python -m backend.llm.run --once --batch 25` — 235/235 posts in ~33 minutes wall-clock on the user's RTX 4060 (Ollama reports `100% GPU`, ~5.1 GB VRAM). Average per-post: ~8s sequentially across the 4 prompts. **Zero failures, zero NULL fields across summary/intent/targets/techniques.**
+3. **Intent distribution:** discussion=111, sale=92, other=17, recruitment=13, doxxing=2 — looks sane for a CTI forum.
+4. `llm_runs` audit table has 11 rows (1 smoke-test run of 2 posts, then ~9 batches of 25 + a tail of 8). All clean exits.
+5. Idempotency confirmed: a follow-up `--once` would no-op because every `raw_posts.id` now has a row in `post_processing_state` for `stage='llm'`.
+
+**Hardware / runtime context:**
+- User's machine: Windows 11 + RTX 4060 8 GB VRAM. Confirmed via `ollama ps`: `mistral:latest 5.1 GB 100% GPU` while running. CPU was NOT in use; my earlier explanation about CPU-bound speed was wrong and corrected mid-conversation. GPU temp held ~70 °C at ~70% utilisation throughout the run.
+- Ollama version 0.22.0, `mistral:latest` (4.4 GB on disk, 5.1 GB resident).
+
+**Known issues / deliberate non-goals:**
+- **Sequential prompts per post** — the 4 prompts in `chain.analyse_post` run one after another. This is the single biggest win still available; user wants live demo to feel snappy, so next session is the async refactor (see "Deferred").
+- The MITRE technique IDs in `techniques_json` are LLM guesses, not verified against the official corpus. That verification is Stage 5's job — by design.
+- `chain._extract_json` has a regex fallback for Mistral's occasional prose-wrapped JSON; in the 235-post run it never had to fire (every JSON-mode response parsed via the fast-path `json.loads`). Worth keeping anyway because the failure mode is rare-but-real.
+
+**User comprehension checks during the build (worth noting for future sessions):**
+- User asked why each post takes ~12s (worried about live-demo feasibility). Walked through: 4 sequential prompts × ~3s each on GPU. After confirming `ollama ps` reports `100% GPU`, agreed that the per-post time is dominated by sequential calls, not throughput. Async refactor will close this.
+- User asked whether Docker / `.onion` are needed for Stage 4. They are NOT — Stage 4 reads from local SQLite and talks only to localhost Ollama. Docker/Tor stack is only needed for Stages 1+2 (or the live-demo path that re-uses scraper+extractor in `--watch` mode).
+- User concerned about whether the demo would be "fake" if pre-computed. Clarified: pre-computed != fake. Every row was genuinely produced by Mistral at some point. The "live demo" path (all 4 stages in `--watch` mode, audience watches a new post enriched in ~60-90s) is the same code, just with the timing visible. **No canned responses, no theatre, and CLAUDE.md §3 now records this as the demo plan.**
+
+**Deferred to next session:**
+- **Async / concurrency refactor** of `chain.analyse_post`. Plan: switch `OllamaClient` to `httpx.AsyncClient`; rewrite `analyse_post` to fire all 4 prompts via `asyncio.gather`; add `--concurrency N` flag to `run.py` for processing N posts in parallel. Target: 12s/post → 2-3s/post end-to-end. Schema is already concurrency-safe (`UNIQUE(raw_post_id)` + upsert).
+- `STAGE_04_LEARN.md` — exhaustive teaching doc covering: file walkthrough (`llm/client.py`, `llm/prompts.py`, `llm/chain.py`, `llm/run.py`, schema additions); design rationales (why Ollama HTTP API not the Python SDK, why `format=json` + regex fallback, why per-stage `post_processing_state` table over more columns on `raw_posts`, why `KNOWN FACTS` block in every prompt, prompt design choices for each of the 4 stages, why temperature=0.2, why JSON-by-example schema pinning, why the techniques are candidates not verified); industry context (LangChain prompt-chains vs hand-rolled, OpenAI structured outputs vs Ollama's `format=json`, GPU vs CPU placement, why CTI workflows are always pre-compute + dashboard-reads).
+
+**Stage exit checklist (per CLAUDE.md §5):**
+- [x] Code works end-to-end (verified: 235/235 posts, zero failures, zero NULL fields).
+- [ ] `STAGE_04_LEARN.md` written at repo root — pending.
+- [x] `CLAUDE.md` §3 updated.
+- [x] `PROGRESS.md` has this entry.
+- [ ] Git commit — **deferred to user**.
+
+**Handoff for next Claude:**
+- Read CLAUDE.md (auto-loaded). Status reflects this entry.
+- **First**, do the async/concurrency refactor of `chain.py` and re-bench against the corpus (`--reset` first, then time the drain). Then write `STAGE_04_LEARN.md`. Then mark Stage 4 ✅ in §3.
+- Stage 5 (MITRE ATT&CK ingest + vector index) is next; do NOT start without an explicit go-ahead.
+- The user has an RTX 4060 — GPU is available, do not assume CPU-bound.
+- Do NOT auto-commit. User commits explicitly.
+
+---
+
+## 2026-04-29 — Stage 3 closed: STAGE_03_LEARN.md shipped
 
 **Done:**
 - Wrote `STAGE_03_LEARN.md` at the repo root, matching the depth + structure of `STAGE_02_LEARN.md`. Sections: mental model of an extraction stage (4-pressure table); file-by-file walkthrough of the schema additions, the guarded `ALTER TABLE` migration in `Store._init_schema`, `backend/pipeline/extract.py` (regex pattern set with line-by-line commentary on the IPv4 permissive-then-validate pattern, simplified IPv6, BTC legacy+bech32, URL stop-set, RFC-5322-pragmatic email; the `refang()` strategy and why we don't mutate the original body; `IOCExtractor.extract()` with the six lessons in its ordering — URL/email before domain, sha256 before sha1 before md5, span-overlap filter, canonicalisation at extract time, `Match` as a frozen dataclass; `EntityExtractor` and why we disable spaCy's parser+lemmatizer, the `_KEEP_LABELS` rationale per label, the curated MALWARE/THREAT_ACTOR pass with three alternatives weighed; `dedupe()` as application-layer perf optimisation atop DB UNIQUE correctness), `backend/pipeline/run.py` (the `WHERE processed_at IS NULL ORDER BY id` cursor and why ordering matters, `process_batch` with five points on the run-log row, the processed_at-after-inserts ordering invariant, one-commit-per-batch, partial-progress-then-raise on exception, no-streaming justification; `run_once`'s `seen < batch` termination; `reset_extractions` and the Stage-2 vs Stage-3 reset boundary). Decision rationales: regex IOCs vs LLM IOC extraction (4 reasons), spaCy `en_core_web_sm` vs md/lg/trf, processed_at column vs separate processing-state table (with explicit migration plan for Stage 4+), `dedupe()` vs DB-only UNIQUE, per-row try/except vs batch insert. Dedicated section unpacking the SQLite `ALTER TABLE … ADD COLUMN` migration story with the three options weighed and why guarded `PRAGMA table_info` is right at this scale. Tech-stack tour with industry context for spaCy, `en_core_web_sm`, Python `re`, defanging conventions, IOCs as the CTI atomic unit, MITRE ATT&CK + STIX 2.1 forward references, SQLite UNIQUE+CASCADE, `PRAGMA table_info` migrations, and an Ollama/Mistral preview. Future-revisit list (more IOC types, whitelisting, confidence scores, MITRE-derived MALWARE/THREAT_ACTOR sets, interval-tree overlap if posts grow, per-IOC-type CLI toggles, fine-tuning spaCy). Explicit Stage 3 → Stage 4 hand-off contract (immutable iocs/entities tables, `raw_posts.id` as the join key, Stage 4 owns its own cursor in a new `post_processing_state` table).

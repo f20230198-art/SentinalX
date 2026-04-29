@@ -87,3 +87,52 @@ CREATE TABLE IF NOT EXISTS extraction_runs (
     entities_inserted INTEGER NOT NULL DEFAULT 0,
     error           TEXT
 );
+
+-- Stage 4: local LLM (Mistral via Ollama) analyses.
+--
+-- llm_analyses: one row per raw_post. Holds the four sub-stage outputs of the
+--               prompt chain — summary, intent, targets, techniques — plus the
+--               raw JSON of each LLM response for debugging / reproducibility.
+--
+-- post_processing_state: per-stage cursor table. Keyed by (raw_post_id, stage)
+--                        so Stages 4, 5, ... can each track their own progress
+--                        without piling more columns onto raw_posts.
+--
+-- llm_runs: audit log mirroring scraper_runs / extraction_runs.
+
+CREATE TABLE IF NOT EXISTS llm_analyses (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    raw_post_id     INTEGER NOT NULL UNIQUE,
+    summary         TEXT,
+    intent          TEXT,
+    targets_json    TEXT,
+    techniques_json TEXT,
+    model           TEXT    NOT NULL,
+    analysed_at     REAL    NOT NULL,
+    raw_responses   TEXT,
+    FOREIGN KEY(raw_post_id) REFERENCES raw_posts(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_analyses_post   ON llm_analyses(raw_post_id);
+CREATE INDEX IF NOT EXISTS idx_llm_analyses_intent ON llm_analyses(intent);
+
+CREATE TABLE IF NOT EXISTS post_processing_state (
+    raw_post_id     INTEGER NOT NULL,
+    stage           TEXT    NOT NULL,
+    processed_at    REAL    NOT NULL,
+    PRIMARY KEY (raw_post_id, stage),
+    FOREIGN KEY(raw_post_id) REFERENCES raw_posts(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_pps_stage ON post_processing_state(stage);
+
+CREATE TABLE IF NOT EXISTS llm_runs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at      REAL    NOT NULL,
+    finished_at     REAL,
+    model           TEXT    NOT NULL,
+    posts_seen      INTEGER NOT NULL DEFAULT 0,
+    posts_completed INTEGER NOT NULL DEFAULT 0,
+    posts_failed    INTEGER NOT NULL DEFAULT 0,
+    error           TEXT
+);
