@@ -21,6 +21,10 @@ Full background, design rationale, and glossary live in [`TECHNICAL_PRIMER.md`](
 
 ---
 
+## 1.5 Working efficiency (READ FIRST)
+
+Finish work the most token-efficient way possible. Don't read whole files when a grep suffices, don't re-read files already in context, batch independent tool calls in parallel, keep prose terse, no preamble/summary fluff. Apply this to every task in this repo.
+
 ## 2. Who the user is and how they want to work
 
 - **User:** Srivathsa (Windows 11, OneDrive-synced repo, bash + PowerShell available, Docker Desktop installed, Python 3.13 + 3.12 + 3.11 installed).
@@ -37,7 +41,7 @@ This preference is also persisted in user-level memory (`feedback_learning_style
 
 ## 3. Project status — keep this section current
 
-**Last updated:** 2026-04-29 (**Stage 4 closed.** Code verified twice (sync + async, 235/235 each). All four LEARN docs (`STAGE_01_LEARN.md` through `STAGE_04_LEARN.md`) rewritten/written in the friendlier voice. Stage 5 next on user go-ahead.)
+**Last updated:** 2026-04-30 (**Stage 6 closed.** FastAPI read-only backend in `backend/api/main.py`. Endpoints: `/healthz`, `/stats`, `/posts(/{id})`, `/techniques(/{tcode})`, `/iocs`, `/entities`. Verified end-to-end against the live DB on port 8765. `STAGE_06_LEARN.md` written. Stage 7 (React frontend) next on user go-ahead.)
 
 ### Stages (8 total)
 
@@ -47,8 +51,8 @@ This preference is also persisted in user-level memory (`feedback_learning_style
 | 2 | Tor scraper + dedup + raw_posts   | ✅ complete   | ✅ `STAGE_02_LEARN.md`    |
 | 3 | NER + IOC extraction (spaCy + regex) | ✅ complete   | ✅ `STAGE_03_LEARN.md`    |
 | 4 | Local LLM pipeline (Ollama/Mistral, 4 stages) | ✅ complete   | ✅ `STAGE_04_LEARN.md`    |
-| 5 | MITRE ATT&CK ingest + vector index | ⬜            | —                        |
-| 6 | FastAPI backend                   | ⬜             | —                        |
+| 5 | MITRE ATT&CK ingest + vector index | ✅ complete   | ✅ `STAGE_05_LEARN.md`    |
+| 6 | FastAPI backend                   | ✅ complete   | ✅ `STAGE_06_LEARN.md`    |
 | 7 | React/Vite/Tailwind frontend      | ⬜             | —                        |
 | 8 | PDF export + attack graph polish  | ⬜             | —                        |
 
@@ -82,11 +86,36 @@ This preference is also persisted in user-level memory (`feedback_learning_style
   - **Verified 2026-04-29 (sync, sequential prompts):** drained 235/235 posts in 1979s (~33.0 min, ~8.42s/post on RTX 4060). Zero failures, zero NULL fields. Intent distribution: discussion=111, sale=92, other=17, recruitment=13, doxxing=2.
   - **Verified 2026-04-29 (async, concurrency=2 + 4-prompt fanout via `asyncio.gather`):** drained 235/235 posts in 1837s (~30.6 min, ~7.82s/post). **Honest result: 1.08x speedup.** Reason: a 7B model on a single 4060 is compute-bound, not latency-bound — there is no idle GPU for parallel requests to fill. Concurrency=4 was actually *worse* (~9s/post on 8-post sample) because too many in-flight prompts starve each other. The async refactor still helps the **live `--watch` demo path** (per-post latency drops from ~8-12s to ~6-8s because the 4 prompts within one post overlap), but it's not the 3-4x batch speedup originally hoped for. Defaults: `--concurrency 2` (set in `run.py`).
 
+- **Stage 5 MITRE pipeline** (`backend/.venv/Scripts/python.exe -m backend.mitre.run --ingest` then `... --once`):
+  - Corpus: official MITRE Enterprise ATT&CK STIX 2.1 JSON, cached at `data/mitre/enterprise-attack.json` (~36 MB, gitignored). Filters revoked/deprecated, keeps `attack-pattern` objects with an `mitre-attack` external_id. 697 techniques (incl. sub-techniques) end up in `mitre_techniques`.
+  - Embedder: `sentence-transformers/all-MiniLM-L6-v2` (384-d, L2-normalised → cosine == dot product). Stored as float32 BLOB in `mitre_techniques.embedding`, alongside `embedding_model` for version tracking.
+  - Match path per post: (1) LLM verification — parse `llm_analyses.techniques_json`, normalise T-codes, mark each `llm_verified` if in corpus else `llm_unverified`. (2) Semantic discovery — embed post body, `corpus_matrix @ post_vec` for cosine scores, take top-k with score ≥ threshold, exclude T-codes already verified to avoid double-counting.
+  - Cursor: posts with `post_processing_state(stage='llm')` AND no `post_processing_state(stage='mitre')` row. Stage 5 owns its own cursor.
+  - Schema additions: `mitre_techniques`, `post_techniques (UNIQUE(raw_post_id, technique_id, source))`, `mitre_runs`.
+  - CLI: `--ingest`, `--once`/`--watch`/`--reset`/`--reset-corpus`, `--topk 5` (default), `--threshold 0.45` (default), `--model NAME`, `--limit N` for smoke tests.
+  - **Verified 2026-04-30:** 697 techniques ingested and embedded in 45.0s (CPU). 235/235 posts matched in ~5s after model warm-up. Result: 232 llm_verified + 45 llm_unverified + 15 semantic = 292 rows. 160/235 posts have ≥1 technique. Top hits: T1566 Phishing (153), T1078 Valid Accounts (34), T1086 PowerShell-legacy (14). Re-run is no-op.
+
+- **Stage 6 FastAPI backend** (`backend/.venv/Scripts/python.exe -m uvicorn backend.api.main:app --port 8765`):
+  - Single file: `backend/api/main.py` (~250 lines). Read-only HTTP layer over the SQLite store.
+  - One sqlite3 connection per process via FastAPI lifespan ctx manager; `check_same_thread=False` because uvicorn runs sync handlers in a threadpool. Pipeline workers stay the sole writers.
+  - CORS wide-open (`allow_origins=["*"]`) for the upcoming Vite dev server on :5173.
+  - Endpoints (all return JSON, all parametrised SQL):
+    - `GET /healthz`
+    - `GET /stats` — totals + breakdowns (category/intent/IOC type/source/top techniques) in one round-trip.
+    - `GET /posts` — paginated list, filters: `category`, `intent`, `technique` (T-code, JOINs `post_techniques`), `q` (LIKE on body+title), `limit` (1–500), `offset`.
+    - `GET /posts/{id}` — full join: post + analysis (with `targets_json`/`techniques_json` deserialised) + iocs + entities + techniques (LEFT JOIN to `mitre_techniques` so `llm_unverified` rows survive). Order: `llm_verified` first, then `semantic`, then `llm_unverified`.
+    - `GET /techniques` — corpus browser, filters `q` and `only_seen`, includes `post_count` correlated subquery.
+    - `GET /techniques/{T-code}` — corpus row + posts mapping to it.
+    - `GET /iocs`, `GET /entities` — aggregated by `(type, value)` / `(label, text)` with occurrence count + post-id list.
+  - Auto-generated docs at `/docs` (Swagger) and `/redoc`.
+  - **Verified 2026-04-30:** all endpoints exercised against live DB. `/stats` shows: 235 posts, 235 LLM-analysed, 235 MITRE-matched, 176 IOCs, 239 entities, 697-technique corpus, 292 post_techniques (232 verified + 45 unverified + 15 semantic). 404 path verified on `/posts/99999`. Server stops cleanly via Ctrl-C / TaskStop.
+  - Deps added to venv: `fastapi==0.115.0`, `uvicorn[standard]==0.30.6` (pulls starlette, httptools, websockets, watchfiles, python-dotenv).
+
 ### What is NOT yet done
 
-- All four LEARN docs (Stages 1–4) shipped in the friendlier voice on 2026-04-29 and the user signed off on Stage 1's voice as the template. If they ask for further voice tweaks, apply the same change uniformly across all four.
-- No git commit has been made for Stage 2 / 3 / 4 / async-refactor / LEARN-rewrites yet beyond the existing `82470de stage 3` commit. User commits explicitly (CLAUDE.md §8).
-- Stage 5 — MITRE ATT&CK ingest + vector index. Will verify the *candidate* technique IDs Stage 4 emits in `llm_analyses.techniques_json` against the official MITRE corpus via embedding similarity, and use embeddings to find techniques the LLM *missed* by searching post bodies semantically against MITRE technique descriptions. Do NOT start without explicit user go-ahead.
+- All six LEARN docs (Stages 1–6) shipped. If voice tweaks come up, apply uniformly.
+- No git commit has been made for Stage 2 / 3 / 4 / 5 / 6 / async-refactor / LEARN-rewrites yet beyond the existing `82470de stage 3` commit. User commits explicitly (CLAUDE.md §8).
+- Stage 7 — React + Vite + Tailwind frontend. Will consume the Stage-6 API and render the dashboard (post list, post detail, technique browser, stats panel, attack-graph placeholder). Do NOT start without explicit user go-ahead.
 
 ### Performance ceiling for Stage 4 (so the next session doesn't re-attempt async)
 
@@ -179,6 +208,7 @@ SentinalX/
 5. **The user is on Windows + bash + PowerShell.** Use Unix paths in scripts (forward slashes, `/dev/null`). Don't `cd` between commands; use absolute paths. PowerShell is available via the PowerShell tool when bash quirks bite.
 6. **Host-side Python venv lives at `backend/.venv` (Python 3.12).** Created during Stage 2. Activate via `backend/.venv/Scripts/python.exe ...` from bash on Windows. Deps so far: `httpx[socks]==0.27.2`. Add a `requirements.txt` under `backend/` if dep list grows.
 7. **httpx + SOCKS: use `socks5://`, not `socks5h://`.** httpx 0.27 raises `Unknown scheme for proxy URL` on `socks5h://`. The SOCKS5 transport in `httpx[socks]` already does proxy-side hostname resolution by default, which is what `.onion` needs. Don't "fix" the URL back to `socks5h://`.
+8. **Splunk owns localhost:8000.** Splunk Web is bound to 127.0.0.1:8000 on the user's machine. `uvicorn --port 8000` will fail to bind ("an attempt was made to access a socket in a way forbidden by its access permissions") and curl will get 303 redirects to `/en-US/...`. Default the API to `--port 8765` (or any other free port) and tell the frontend to point there.
 
 ---
 

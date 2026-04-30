@@ -4,7 +4,80 @@ Append a new dated entry every time a stage advances, a blocker is hit, or a non
 
 ---
 
-## 2026-04-29 (latest) — Stage 4 closed: STAGE_02/03/04_LEARN.md shipped in friendlier voice
+## 2026-04-30 (latest) — Stage 6 closed: FastAPI read-only backend
+
+**Done in this session:**
+- Wrote `backend/api/main.py` (~250 lines) — single-file FastAPI app over the SQLite store.
+- Installed `fastapi==0.115.0` and `uvicorn[standard]==0.30.6` into `backend/.venv` (pulls starlette, httptools, watchfiles, websockets, python-dotenv).
+- Architecture decisions:
+  - One sqlite3 connection per process, opened in a `lifespan` async context manager and stored on `app.state.conn`. `check_same_thread=False` because uvicorn dispatches sync handlers in a threadpool. Read-only by design — the pipeline workers (their own processes, their own connections) remain the sole writers, so no contention.
+  - CORS wide-open for the upcoming Vite frontend.
+  - All filters parametrised SQL (`?` placeholders, args list); column names are constants.
+  - `/posts/{id}` does a 5-way join (post + analysis + iocs + entities + techniques) and deserialises `targets_json` / `techniques_json` so the frontend never sees stringified JSON.
+  - `/posts/{id}` techniques sorted: `llm_verified` → `semantic` → `llm_unverified`, then by score desc, then by T-code.
+  - `/techniques` uses `LEFT JOIN mitre_techniques` (so unverified T-codes survive the response) plus a correlated `post_count` subquery; relies on `idx_pt_tech` for speed.
+  - `/iocs` and `/entities` aggregate on the server with `GROUP_CONCAT(raw_post_id)`; the API splits the comma string back into a real `int[]` before returning so consumers don't have to.
+- **Verified 2026-04-30:** all endpoints exercised against the live DB.
+  - `/healthz` → `{"status":"ok"}`.
+  - `/stats` → 235 posts / 235 LLM-analysed / 235 MITRE-matched / 176 IOCs / 239 entities / 697-technique corpus / 292 post_techniques (232 verified + 45 unverified + 15 semantic). Intent breakdown: discussion 113, sale 94, other 20, recruitment 8.
+  - `/posts?limit=2`, `/posts?intent=sale`, `/posts?technique=T1566` (153 hits), `/posts/1` (full join, sample showed targets/techniques deserialised), `/posts/99999` → 404.
+  - `/techniques?only_seen=true` → 24 techniques attached to ≥1 post (top: T1566/153, T1078/34, T1087/12).
+  - `/techniques/T1566` → corpus row + 153 mapped posts.
+  - `/iocs?ioc_type=ipv4` → top IPv4 23.129.64.218 (10 occurrences). `/entities?label=THREAT_ACTOR` → APT29 ×5, FIN7 ×4, APT28 ×2.
+- Wrote `STAGE_06_LEARN.md` in the same voice as Stages 1–5: mental model (why the API is a separate stage; why FastAPI not Flask), file map, endpoint surface, architecture choices (single connection w/ `check_same_thread=False`, lifespan ctx mgr, CORS, offset vs cursor pagination, parametrised SQL, the LEFT JOIN reasoning, `CASE … ORDER BY` for technique ranking), worked example of `/posts/{id}` and `/stats` shapes, tech-stack tour with industry context (Splunk/Elastic/Sentinel/CrowdStrike/Recorded Future, OpenAPI codegen, CQRS-lite), what's deferred to Stage 7/8 (auth, WebSocket, PDF, graph endpoint), gotchas, end-of-stage status.
+- Updated `CLAUDE.md`: header date, Stage 6 row → ✅ complete / ✅ LEARN, Stage 6 paragraph in "currently running / verified working", "What is NOT yet done" updated for Stage 7. Added gotcha #8 to §7 (Splunk owns localhost:8000 — use `--port 8765`).
+
+**Stage exit checklist for Stage 6 (per CLAUDE.md §5):**
+- [x] Code works end-to-end (verified by running uvicorn + curl-ing every endpoint against the live DB).
+- [x] `STAGE_06_LEARN.md` shipped at repo root.
+- [x] `CLAUDE.md` §3 updated; new gotcha added to §7.
+- [x] `PROGRESS.md` entry added (this entry).
+- [ ] Git commit — deferred per CLAUDE.md §8 (user commits explicitly).
+
+**Notes / gotchas worth carrying forward:**
+- Splunk Web binds 127.0.0.1:8000 on the user's machine. `uvicorn --port 8000` fails with `[Errno 13] error while attempting to bind`. Use `--port 8765`.
+- `check_same_thread=False` is safe for read-only API; would need re-thinking if Stage 8 ever adds write endpoints (e.g. PDF export logging). Switching the DB to WAL mode (`PRAGMA journal_mode=WAL`) is the right move at that point.
+- `_maybe_json` parses the stored `targets_json` / `techniques_json` columns on the way out so the frontend gets real objects. Storage-format-vs-API-shape decoupling pattern.
+- We deliberately did *not* add SQLAlchemy, pydantic response models, auth, caching, or background tasks. Each was considered and skipped with a reason in the LEARN doc; revisit if scale or threat model changes.
+
+**Next session:** Stage 7 — React + Vite + Tailwind frontend that consumes this API. Do not start without explicit user go-ahead per CLAUDE.md §3.
+
+---
+
+## 2026-04-30 — Stage 5 closed: MITRE ATT&CK ingest + vector index
+
+**Done in this session:**
+- Stage 5 code (already scaffolded prior to session) verified end-to-end:
+  - `backend/mitre/ingest.py` — downloads the official MITRE Enterprise STIX 2.1 JSON to `data/mitre/enterprise-attack.json`, parses out attack-pattern objects (drops revoked/deprecated, requires an `mitre-attack` external_id T-code), resolves sub-technique parent T-codes via STIX relationship objects.
+  - `backend/mitre/embed.py` — sentence-transformers wrapper around `all-MiniLM-L6-v2` (384-d, L2-normalised). float32 BLOB roundtrip via `np.frombuffer` / `tobytes`; lazy model load via `lru_cache`.
+  - `backend/mitre/match.py` — two-pass matcher per post: (1) verify LLM's candidate T-codes against the corpus set → `llm_verified` or `llm_unverified`; (2) embed post body, `corpus_matrix @ post_vec` cosine, `argpartition` top-k with threshold and exclude set.
+  - `backend/mitre/run.py` — CLI: `--ingest`, `--once`/`--watch`, `--reset` / `--reset-corpus`, `--topk 5`, `--threshold 0.45`, `--model`, `--limit`, `--batch 25`. Cursor uses the `post_processing_state` table introduced in Stage 4 with `stage='mitre'` rows.
+  - Schema: `mitre_techniques` (PRIMARY KEY technique_id, embedding BLOB), `post_techniques (UNIQUE(raw_post_id, technique_id, source))`, `mitre_runs` audit log.
+- **Verified runs (2026-04-30):**
+  - `--ingest`: 697 techniques parsed, embedded in 45.0s on CPU, upserted into `mitre_techniques`.
+  - `--once`: 235/235 posts processed in ~5s (after model warm-up). 232 llm_verified + 45 llm_unverified + 15 semantic = 292 rows in `post_techniques`. 160/235 posts have ≥1 technique attached. Top T-codes: T1566 Phishing (153), T1078 Valid Accounts (34), T1086 PowerShell-legacy (14), T1087 Account Discovery (12). Semantic scores cluster 0.451–0.505 (threshold 0.45).
+  - Re-run `--once`: no-op (cursor working — drains nothing).
+- Wrote `STAGE_05_LEARN.md` in the same voice as Stages 1–4: mental model (probabilistic Stage-4 → grounding via Stage 5), what MITRE ATT&CK is, STIX 2.1 quirks (sub-techniques as relationship objects, T-codes in external_references), embedding fundamentals (cosine vs dot product, why we normalise), why MiniLM specifically, why BLOB instead of JSON, why no FAISS at this scale, the verify+discover pass split with line refs, calibration of `topk=5` / `threshold=0.45`, full tech-stack tour with industry context (TRAM, Sentinel, CrowdStrike, Recorded Future), what's deferred, gotchas, end-of-stage status.
+- Updated `CLAUDE.md` §3: header date → 2026-04-30, Stage 5 row → ✅ complete / ✅ LEARN, added Stage 5 paragraph to "What is currently running / verified working", "What is NOT yet done" updated for Stage 6.
+
+**Stage exit checklist for Stage 5 (per CLAUDE.md §5):**
+- [x] Code works end-to-end (verified by running ingest + match against the live DB).
+- [x] `STAGE_05_LEARN.md` shipped at repo root.
+- [x] `CLAUDE.md` §3 updated.
+- [x] `PROGRESS.md` entry added (this entry).
+- [ ] Git commit — deferred per CLAUDE.md §8 (user commits explicitly).
+
+**Notes / gotchas worth carrying forward:**
+- The threshold `0.45` is calibrated to our specific synthetic forum corpus. Real-world bodies (longer, more technical) may want re-tuning. CLI flag is exposed.
+- Many "verified" T-codes in our results are deprecated parents (T1086, T1077, T1192, T1078). MITRE keeps them in the JSON until they're fully revoked, so they pass our corpus-membership check. Modernising these to current sub-technique IDs is deliberately deferred to Stage 6.
+- First `--ingest` is dominated by the 45s embedding pass + initial sentence-transformers / HuggingFace cache populate. Subsequent ingests after `--reset-corpus` are fast.
+- `urllib` 120s timeout in `ingest.download` is tight if MITRE GitHub mirror rate-limits; not seen in practice but documented in LEARN doc gotchas.
+
+**Next session:** Stage 6 — FastAPI backend exposing raw_posts, iocs, entities, llm_analyses, post_techniques, mitre_techniques. Do not start without explicit user go-ahead per CLAUDE.md §3.
+
+---
+
+## 2026-04-29 — Stage 4 closed: STAGE_02/03/04_LEARN.md shipped in friendlier voice
 
 **Done in this session:**
 - Wrote `STAGE_02_LEARN.md` and `STAGE_03_LEARN.md` from scratch in the new friendlier voice (matching the Stage 1 template the user signed off on earlier today). Every technical point from the prior versions preserved — file-by-file walkthroughs, decision rationales, tech-stack tour with industry context, gotchas, hand-off contracts. Voice changes:

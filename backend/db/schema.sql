@@ -136,3 +136,59 @@ CREATE TABLE IF NOT EXISTS llm_runs (
     posts_failed    INTEGER NOT NULL DEFAULT 0,
     error           TEXT
 );
+
+-- Stage 5: MITRE ATT&CK ingest + vector index.
+--
+-- mitre_techniques: one row per Enterprise ATT&CK technique (and sub-technique).
+--                   Embedding is stored as a raw float32 BLOB so we can mmap-load
+--                   the whole matrix for cosine search without per-row JSON parse.
+--
+-- post_techniques: one row per (raw_post_id, technique_id, source). source is
+--                  'llm_verified'   - LLM emitted this T-code AND it exists in corpus
+--                  'llm_unverified' - LLM emitted this T-code but it's not in corpus
+--                  'semantic'       - cosine search surfaced it; LLM didn't mention it
+--                  Idempotent re-runs via UNIQUE(raw_post_id, technique_id, source).
+--
+-- mitre_runs: audit log mirroring scraper_runs / extraction_runs / llm_runs.
+
+CREATE TABLE IF NOT EXISTS mitre_techniques (
+    technique_id    TEXT    PRIMARY KEY,
+    name            TEXT    NOT NULL,
+    description     TEXT    NOT NULL,
+    tactics         TEXT    NOT NULL,
+    url             TEXT,
+    is_subtechnique INTEGER NOT NULL DEFAULT 0,
+    parent_id       TEXT,
+    embedding       BLOB,
+    embedding_model TEXT,
+    ingested_at     REAL    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_mitre_parent ON mitre_techniques(parent_id);
+
+CREATE TABLE IF NOT EXISTS post_techniques (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    raw_post_id     INTEGER NOT NULL,
+    technique_id    TEXT    NOT NULL,
+    source          TEXT    NOT NULL,
+    score           REAL,
+    evidence        TEXT,
+    matched_at      REAL    NOT NULL,
+    UNIQUE(raw_post_id, technique_id, source),
+    FOREIGN KEY(raw_post_id) REFERENCES raw_posts(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_pt_post   ON post_techniques(raw_post_id);
+CREATE INDEX IF NOT EXISTS idx_pt_tech   ON post_techniques(technique_id);
+CREATE INDEX IF NOT EXISTS idx_pt_source ON post_techniques(source);
+
+CREATE TABLE IF NOT EXISTS mitre_runs (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at          REAL    NOT NULL,
+    finished_at         REAL,
+    posts_seen          INTEGER NOT NULL DEFAULT 0,
+    verified_inserted   INTEGER NOT NULL DEFAULT 0,
+    unverified_inserted INTEGER NOT NULL DEFAULT 0,
+    semantic_inserted   INTEGER NOT NULL DEFAULT 0,
+    error               TEXT
+);
