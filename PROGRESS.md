@@ -4,7 +4,45 @@ Append a new dated entry every time a stage advances, a blocker is hit, or a non
 
 ---
 
-## 2026-04-30 (latest) — Stage 6 closed: FastAPI read-only backend
+## 2026-04-30 (latest) — Stage 6.5: investigations layer + lens reruns + diagnostics
+
+**Why this exists:** While reviewing Apurv Singh Gautam's [Robin](https://github.com/apurvsinghgautam/robin) (NetworkChuck-reviewed AI dark-web OSINT tool) the user asked what we should learn from it. Three patterns mapped cleanly onto SentinelX without diluting its identity (continuous monitoring, not ad-hoc search): the *Investigation* abstraction (named, replayable filter views), preset *analysis lenses* (the same data re-summarised through different analyst perspectives), and a deeper *health check* for the dashboard. Built as a "Stage 6.5" before Stage 7 frontend so the UI has richer material to render.
+
+**Done in this session:**
+- Schema: added `investigations` table (id, name, description, filters_json, lens, summary, summary_model, summary_post_ids, created_at, updated_at, last_run_at) + `idx_investigations_created`. Migration applied via `executescript` against the live DB; existing tables untouched.
+- `backend/llm/lenses.py` — four lenses (`threat_intel`, `ransomware`, `personal_identity`, `corporate_espionage`) with system prompts inspired by Robin's `PRESET_PROMPTS` but rewritten to reference SentinelX's structured fields (IOCs, entities, MITRE techniques) so the LLM doesn't re-derive what we already extracted. Lens names live in code, not DB — prompt evolution doesn't require migrations.
+- `backend/api/investigations.py` — service module: filter→SQL translation (`category`, `intent`, `technique`, `q`, `ioc_type`, `since`, `until`, `post_ids`; all combine with AND), filter evaluation/count, post-pack helper that renders one post + its enrichment as a compact text block for the LLM, and `run_lens_summary` that re-evaluates the filter on rerun (caps at `MAX_POSTS_PER_RERUN=20`, body clipped to `MAX_BODY_CHARS=1200`), calls Mistral via the existing `OllamaClient` with the lens system prompt, and writes summary + summary_model + summary_post_ids + last_run_at back onto the row. Filters stored verbatim as JSON; investigations are *live views*, not snapshots.
+- `backend/api/main.py` — added `Body` + `Response` imports, bumped version to `0.6.5`, registered: `GET /lenses`, `GET/POST/PATCH/DELETE /investigations[/id]`, `POST /investigations/{id}/rerun`, `GET /healthz/full`. The full health probe runs four independent checks (DB, Tor SOCKS5 TCP probe, Ollama `/api/tags`, pipeline cursor backlog at each stage).
+- **Verified 2026-04-30 against live DB on :8765:**
+  - `/lenses` → 4 items.
+  - Create investigation (`POST /investigations`) → row 1 with filter `{intent:sale, q:credential}`, lens `ransomware`. After PATCH, `/investigations/1` shows `matched_total=6` (post ids 210, 162, 148, 123, 100, 30 — all VPN-cred sales).
+  - `POST /investigations/1/rerun` → 36.78s end-to-end. Mistral returned a 1744-char ransomware-lens report with `[#post_id]` citations, IOCs correctly attributed (e.g. `okta-sso.help` cited across all 6 posts; per-post ipv4s back-traced to source ids), MITRE chain grounded in techniques actually mapped to the post set (T1078, T1087, T1566). `last_run_at`, `summary_model='mistral'`, `summary_post_ids=[210,162,148,123,100,30]` persisted.
+  - `/healthz/full`: db up (0ms), ollama up (696ms, mistral:latest installed), pipeline up (0/0/0 backlog), tor_socks down (Docker stack not currently running — expected).
+  - Negative paths: invalid lens on POST → 400; DELETE → 204; subsequent GET → 404; bad-body curl → 400.
+- **Filter SQL bug avoided during build:** original draft used `args.insert(0, ...)` for both `technique` and `ioc_type` JOIN bindings, which silently swapped them when both filters were set. Refactored to maintain `join_args` and `where_args` as separate lists, returning `join_args + where_args` so positional `?` placeholders stay aligned with their JOIN/WHERE order regardless of which filter keys are present.
+- `STAGE_06_5_LEARN.md` written: Robin comparison + identity sentence (Robin = ad-hoc OSINT search; SentinelX = continuous monitoring), the *live view vs snapshot* decision, lens prompt design (why we feed structured fields not raw text), filter→SQL translation pattern, why we don't keep summary history, where this hooks into Stage 7 (saved-investigations sidebar, lens selector, health card on dashboard).
+
+**Stage 6.5 exit checklist:**
+- [x] Schema migration applied + verified.
+- [x] All 8 new endpoints registered and exercised against live DB.
+- [x] Real lens rerun against Mistral (not a mocked test).
+- [x] Negative paths verified (404, 400, 204).
+- [x] LEARN doc shipped.
+- [x] CLAUDE.md §3 updated.
+- [x] This PROGRESS.md entry.
+- [ ] Git commit — deferred per CLAUDE.md §8.
+
+**Notes / gotchas worth carrying forward:**
+- Lens reruns are **live**: rerunning re-evaluates the filter at rerun time, so an investigation created last week against `intent=sale` will pick up newly-ingested sale posts on the next rerun. This is the right behaviour for a continuous-monitoring tool but means `summary_post_ids` is a record of *that rerun's* inputs, not the investigation's permanent membership.
+- We cap rerun input at 20 posts (`MAX_POSTS_PER_RERUN`) and 1200 chars/body (`MAX_BODY_CHARS`) because Mistral's effective context starts degrading past ~8k tokens. Bigger investigations get sampled. If/when we move to a longer-context model, raise the caps in `backend/api/investigations.py`.
+- The `/healthz/full` endpoint imports `OllamaClient` lazily inside the handler so cold starts don't pay for the import path when only `/healthz` is hit. Tor probe is a 2s TCP timeout — we don't actually open a circuit because doing so from the API process would dirty the scraper's port pool.
+- Robin's preset prompts were not copied verbatim. Our prompts explicitly reference our schema's IOC/entity/technique structures so the LLM uses them as authoritative rather than re-deriving from text.
+
+**Next session:** Stage 7 — React + Vite + Tailwind frontend. Per `STAGE_07_DESIGN.md` this is the dark-Avinyr-meets-Dark-Netflix design. Saved-investigations sidebar + lens selector now have a backend to talk to. Do not start without explicit user go-ahead per CLAUDE.md §3.
+
+---
+
+## 2026-04-30 — Stage 6 closed: FastAPI read-only backend
 
 **Done in this session:**
 - Wrote `backend/api/main.py` (~250 lines) — single-file FastAPI app over the SQLite store.

@@ -41,7 +41,7 @@ This preference is also persisted in user-level memory (`feedback_learning_style
 
 ## 3. Project status — keep this section current
 
-**Last updated:** 2026-04-30 (**Stage 6 closed.** FastAPI read-only backend in `backend/api/main.py`. Endpoints: `/healthz`, `/stats`, `/posts(/{id})`, `/techniques(/{tcode})`, `/iocs`, `/entities`. Verified end-to-end against the live DB on port 8765. `STAGE_06_LEARN.md` written. Stage 7 (React frontend) next on user go-ahead.)
+**Last updated:** 2026-04-30 (**Stage 7 scaffolded.** Vite 6 + React 18 + TS + Tailwind v4 in `frontend/`. Violet palette (`#0A0612` base / `#13033b` deep / `#A78BFA` accent) wired via `@theme` block in `src/index.css`. Boot sequence + CRT toggle + cursor halo + scramble hook implemented. Home page renders hero, health grid, post-feed teaser, and top-techniques bar chart against the live Stage-6 API via `/api/*` proxy. Type-checks clean, dev server verified end-to-end. Routes for `/posts`, `/techniques`, `/investigations` are placeholders — those land in subsequent commits along with the horizontal Dark-style timeline. `STAGE_07_DESIGN.md` decisions locked.)
 
 ### Stages (8 total)
 
@@ -53,7 +53,8 @@ This preference is also persisted in user-level memory (`feedback_learning_style
 | 4 | Local LLM pipeline (Ollama/Mistral, 4 stages) | ✅ complete   | ✅ `STAGE_04_LEARN.md`    |
 | 5 | MITRE ATT&CK ingest + vector index | ✅ complete   | ✅ `STAGE_05_LEARN.md`    |
 | 6 | FastAPI backend                   | ✅ complete   | ✅ `STAGE_06_LEARN.md`    |
-| 7 | React/Vite/Tailwind frontend      | ⬜             | —                        |
+| 6.5 | Investigations + lenses + diagnostics | ✅ complete | ✅ `STAGE_06_5_LEARN.md` |
+| 7 | React/Vite/Tailwind frontend      | ⬜             | — (design: `STAGE_07_DESIGN.md`) |
 | 8 | PDF export + attack graph polish  | ⬜             | —                        |
 
 ### What is currently running / verified working
@@ -111,11 +112,19 @@ This preference is also persisted in user-level memory (`feedback_learning_style
   - **Verified 2026-04-30:** all endpoints exercised against live DB. `/stats` shows: 235 posts, 235 LLM-analysed, 235 MITRE-matched, 176 IOCs, 239 entities, 697-technique corpus, 292 post_techniques (232 verified + 45 unverified + 15 semantic). 404 path verified on `/posts/99999`. Server stops cleanly via Ctrl-C / TaskStop.
   - Deps added to venv: `fastapi==0.115.0`, `uvicorn[standard]==0.30.6` (pulls starlette, httptools, websockets, watchfiles, python-dotenv).
 
+- **Stage 6.5 investigations layer** (same uvicorn process as Stage 6):
+  - Schema additions: `investigations` table (`id`, `name`, `description`, `filters_json`, `lens`, `summary`, `summary_model`, `summary_post_ids`, `created_at`, `updated_at`, `last_run_at`) + `idx_investigations_created`. Migration applied via `executescript` against the live DB.
+  - `backend/llm/lenses.py` — 4 lenses: `threat_intel`, `ransomware`, `personal_identity`, `corporate_espionage`. System prompts inspired by Robin's `PRESET_PROMPTS` but rewritten to reference SentinelX's structured fields (IOCs/entities/MITRE techniques fed into the prompt as authoritative context, so the LLM doesn't re-derive them from text).
+  - `backend/api/investigations.py` — service module: filter→SQL translator (filters: `category`, `intent`, `technique`, `q`, `ioc_type`, `since`, `until`, `post_ids`; AND-combined), filter evaluation, post-pack helper that renders one post + its enrichment as a compact LLM block, `run_lens_summary` which re-evaluates the filter at rerun time (so investigations are *live views*, not snapshots), caps inputs at `MAX_POSTS_PER_RERUN=20` and `MAX_BODY_CHARS=1200`, calls Mistral via the existing `OllamaClient`.
+  - New endpoints: `GET /lenses`, `GET/POST/PATCH/DELETE /investigations[/id]`, `POST /investigations/{id}/rerun`, `GET /healthz/full`. The full health probe checks DB, Tor SOCKS5 (TCP probe only — does not open a circuit, to avoid dirtying the scraper's port pool), Ollama `/api/tags`, and pipeline cursor backlog at each of extraction/llm/mitre.
+  - **Verified 2026-04-30:** `/lenses` → 4 items. Created investigation with filter `{intent:'sale', q:'credential'}` + lens `ransomware` → `matched_total=6` (post ids 210, 162, 148, 123, 100, 30 — VPN-cred sales). `POST /investigations/1/rerun` ran in 36.78s on Mistral, returned a 1744-char ransomware-lens report with `[#post_id]` citations, IOCs correctly attributed back to source posts (e.g. `okta-sso.help` cited across all 6), and a MITRE chain grounded in techniques actually mapped to the post set. `last_run_at` / `summary_model='mistral'` / `summary_post_ids` persisted. Negative paths: invalid lens → 400; DELETE → 204; subsequent GET → 404. `/healthz/full` showed db/ollama/pipeline up, tor down (Docker stack not running — expected).
+  - Filter SQL gotcha caught during build: original draft used two `args.insert(0, ...)` calls for `technique` and `ioc_type` JOIN bindings, which silently swapped them when both filters were set. Fix: maintain `join_args` and `where_args` as separate lists, return `join_args + where_args` so `?` placeholders stay aligned with their JOIN/WHERE order.
+
 ### What is NOT yet done
 
-- All six LEARN docs (Stages 1–6) shipped. If voice tweaks come up, apply uniformly.
-- No git commit has been made for Stage 2 / 3 / 4 / 5 / 6 / async-refactor / LEARN-rewrites yet beyond the existing `82470de stage 3` commit. User commits explicitly (CLAUDE.md §8).
-- Stage 7 — React + Vite + Tailwind frontend. Will consume the Stage-6 API and render the dashboard (post list, post detail, technique browser, stats panel, attack-graph placeholder). Do NOT start without explicit user go-ahead.
+- All seven LEARN docs (Stages 1–6 + 6.5) shipped. If voice tweaks come up, apply uniformly.
+- No git commit has been made for Stage 2 / 3 / 4 / 5 / 6 / 6.5 / async-refactor / LEARN-rewrites yet beyond the existing `82470de stage 3` commit. User commits explicitly (CLAUDE.md §8).
+- Stage 7 — React + Vite + Tailwind frontend. Will consume the Stage-6 + 6.5 API and render the dashboard (post list, post detail, technique browser, stats panel, **saved-investigations sidebar**, **lens selector**, **health card**, attack-graph placeholder). Design brief in `STAGE_07_DESIGN.md` (dark Avinyr-meets-Dark-Netflix aesthetic, auto-building timeline). Do NOT start without explicit user go-ahead.
 
 ### Performance ceiling for Stage 4 (so the next session doesn't re-attempt async)
 

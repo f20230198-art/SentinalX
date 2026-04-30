@@ -1,0 +1,141 @@
+@import "tailwindcss";
+
+/*
+ * SentinelX design tokens. Tailwind v4 reads @theme blocks and emits utility
+ * classes for every entry — `bg-base`, `text-accent`, etc.
+ */
+@theme {
+  --color-base: #0a0612;
+  --color-deep: #13033b;
+  --color-surface-1: #130927;
+  --color-surface-2: #1c1035;
+  --color-border-soft: #2a1f45;
+
+  --color-text: #e6e3f0;
+  --color-text-muted: #7a7090;
+
+  --color-accent: #a78bfa;
+  --color-accent-strong: #7c3aed;
+  --color-warn: #e8a33d;
+  --color-danger: #e5484d;
+
+  --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
+}
+
+html,
+body {
+  background: var(--color-base);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-feature-settings: "ss01", "cv11";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+#root {
+  min-height: 100vh;
+  position: relative;
+  isolation: isolate;
+}
+
+/* Hero gradient — radial wash of #13033b fading to base. */
+.hero-gradient {
+  background:
+    radial-gradient(
+      ellipse 80% 60% at 30% 0%,
+      rgba(19, 3, 59, 0.85) 0%,
+      rgba(19, 3, 59, 0.35) 35%,
+      var(--color-base) 75%
+    );
+}
+
+/* Site-wide grain. Fixed-position SVG noise rendered as a CSS data URI so we
+ * don't ship a separate file. 4% opacity + screen blend feels like dust on
+ * the screen rather than visual noise. */
+.grain::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  opacity: 0.04;
+  mix-blend-mode: screen;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+}
+
+/* Scanline overlay for CRT mode. Body gets `data-crt="on"` from the toggle. */
+body[data-crt="on"]::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(167, 139, 250, 0.06) 0px,
+    rgba(167, 139, 250, 0.06) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  mix-blend-mode: overlay;
+}
+
+body[data-crt="on"] {
+  text-shadow: 0 0 1px rgba(167, 139, 250, 0.3);
+}
+
+/* Cursor halo — soft violet glow that follows the cursor. The CSS vars are
+ * updated from useCursorHalo() on mousemove. */
+.cursor-halo::before {
+  content: "";
+  position: fixed;
+  left: var(--mx, 50%);
+  top: var(--my, 50%);
+  width: 480px;
+  height: 480px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 0;
+  background: radial-gradient(
+    circle,
+    rgba(167, 139, 250, 0.08) 0%,
+    rgba(167, 139, 250, 0) 60%
+  );
+  transition: opacity 0.3s ease;
+}
+
+/* Hairline divider with mono labels — the Avinyr [03] // SECTION look. */
+.section-divider {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+.section-divider hr {
+  flex: 1;
+  border: 0;
+  border-top: 1px solid var(--color-border-soft);
+}
+
+/* Scramble-on-reveal char — useScramble() swaps innerText through random
+ * chars; this just locks the layout box so the swap doesn't reflow. */
+.scramble {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Skip the boot-sequence entry animation if user prefers reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

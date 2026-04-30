@@ -192,3 +192,36 @@ CREATE TABLE IF NOT EXISTS mitre_runs (
     semantic_inserted   INTEGER NOT NULL DEFAULT 0,
     error               TEXT
 );
+
+-- Stage 6.5: investigations layer.
+--
+-- An investigation is a named, replayable view: a saved filter over the corpus
+-- plus an optional cross-post LLM summary written through one of four "lenses"
+-- (threat_intel / ransomware / personal_identity / corporate_espionage). The
+-- filter is stored as JSON and re-evaluated on every read, so investigations
+-- stay in sync as new posts arrive — they aren't frozen snapshots.
+--
+-- A rerun re-evaluates the filter, picks the matching post bodies + their
+-- enrichment, and asks the LLM to write a single fused summary under the
+-- chosen lens. The result is stored on the investigation row; reruns
+-- overwrite. We don't keep history (no `investigation_summaries` table)
+-- because storage cost > evidence value for a learning project.
+--
+-- Lens names live in code (backend/llm/lenses.py), not in the DB, so we can
+-- evolve prompts without a migration. We just store the lens name string.
+
+CREATE TABLE IF NOT EXISTS investigations (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT    NOT NULL,
+    description     TEXT,
+    filters_json    TEXT    NOT NULL,
+    lens            TEXT,
+    summary         TEXT,
+    summary_model   TEXT,
+    summary_post_ids TEXT,
+    created_at      REAL    NOT NULL,
+    updated_at      REAL    NOT NULL,
+    last_run_at     REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_investigations_created ON investigations(created_at DESC);

@@ -19,8 +19,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
+
+from backend.api import investigations as inv
+from backend.llm.lenses import LENSES, list_lenses
 
 DB_PATH = Path(__file__).resolve().parents[1] / "db" / "sentinelx.db"
 
@@ -41,7 +45,7 @@ async def lifespan(app: FastAPI):
         app.state.conn.close()
 
 
-app = FastAPI(title="SentinelX I", version="0.6.0", lifespan=lifespan)
+app = FastAPI(title="SentinelX I", version="0.6.5", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -280,6 +284,166 @@ def list_iocs(
     for it in items:
         it["post_ids"] = [int(x) for x in (it["post_ids"] or "").split(",") if x]
     return {"total": total, "limit": limit, "offset": offset, "items": items}
+
+
+# --------------------------------------------------------------------------- #
+# Investigations + lenses (Stage 6.5)
+# --------------------------------------------------------------------------- #
+
+@app.get("/lenses")
+def get_lenses() -> dict[str, Any]:
+    return {"items": list_lenses()}
+
+
+@app.get("/investigations")
+def list_investigations() -> dict[str, Any]:
+    return {"items": inv.list_investigations(app.state.conn)}
+
+
+@app.post("/investigations", status_code=201)
+def create_investigation(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    name = (payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "name is required")
+    lens = payload.get("lens")
+    if lens is not None and lens not in LENSES:
+        raise HTTPException(400, f"unknown lens '{lens}'. choices: {sorted(LENSES)}")
+    return inv.create_investigation(
+        app.state.conn,
+        name=name,
+        description=payload.get("description"),
+        filters=payload.get("filters") or {},
+        lens=lens,
+    )
+
+
+@app.get("/investigations/{investigation_id}")
+def get_investigation(investigation_id: int) -> dict[str, Any]:
+    try:
+        return inv.get_investigation(app.state.conn, investigation_id)
+    except KeyError:
+        raise HTTPException(404, f"investigation {investigation_id} not found")
+
+
+@app.patch("/investigations/{investigation_id}")
+def update_investigation(
+    investigation_id: int, payload: dict[str, Any] = Body(...)
+) -> dict[str, Any]:
+    lens = payload.get("lens")
+    if lens is not None and lens not in LENSES:
+        raise HTTPException(400, f"unknown lens '{lens}'. choices: {sorted(LENSES)}")
+    try:
+        return inv.update_investigation(
+            app.state.conn,
+            investigation_id,
+            name=payload.get("name"),
+            description=payload.get("description"),
+            filters=payload.get("filters"),
+            lens=lens,
+        )
+    except KeyError:
+        raise HTTPException(404, f"investigation {investigation_id} not found")
+
+
+@app.delete("/investigations/{investigation_id}")
+def delete_investigation(investigation_id: int) -> Response:
+    if not inv.delete_investigation(app.state.conn, investigation_id):
+        raise HTTPException(404, f"investigation {investigation_id} not found")
+    return Response(status_code=204)
+
+
+@app.post("/investigations/{investigation_id}/rerun")
+def rerun_investigation(
+    investigation_id: int, payload: dict[str, Any] = Body(default={})
+) -> dict[str, Any]:
+    model = (payload or {}).get("model", "mistral")
+    try:
+        return inv.run_lens_summary(app.state.conn, investigation_id, model=model)
+    except KeyError:
+        raise HTTPException(404, f"investigation {investigation_id} not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"lens rerun failed: {e}")
+
+
+# --------------------------------------------------------------------------- #
+# Diagnostics
+# --------------------------------------------------------------------------- #
+
+@app.get("/healthz/full")
+def healthz_full() -> dict[str, Any]:
+    """Deeper diagnostics for the dashboard. Each probe is independent."""
+    import socket
+    import time as _time
+
+    c = app.state.conn
+    out: dict[str, Any] = {"status": "ok", "checks": {}}
+
+    # DB: a trivial query proves the connection is live.
+    t0 = _time.perf_counter()
+    try:
+        c.execute("SELECT 1").fetchone()
+        out["checks"]["db"] = {
+            "status": "up",
+            "latency_ms": int((_time.perf_counter() - t0) * 1000),
+            "path": str(DB_PATH),
+        }
+    except Exception as e:
+        out["checks"]["db"] = {"status": "down", "error": str(e)}
+        out["status"] = "degraded"
+
+    # Tor SOCKS5: TCP probe only — we don't actually open a circuit.
+    t0 = _time.perf_counter()
+    try:
+        with socket.create_connection(("127.0.0.1", 9050), timeout=2.0):
+            out["checks"]["tor_socks"] = {
+                "status": "up",
+                "latency_ms": int((_time.perf_counter() - t0) * 1000),
+            }
+    except Exception as e:
+        out["checks"]["tor_socks"] = {"status": "down", "error": str(e)}
+
+    # Ollama: the OllamaClient.health() call lists installed models.
+    t0 = _time.perf_counter()
+    try:
+        from backend.llm.client import OllamaClient
+        with OllamaClient() as cli:
+            models = cli.health()
+        out["checks"]["ollama"] = {
+            "status": "up",
+            "latency_ms": int((_time.perf_counter() - t0) * 1000),
+            "models": models,
+        }
+    except Exception as e:
+        out["checks"]["ollama"] = {"status": "down", "error": str(e)}
+
+    # Pipeline cursor state: how many posts are pending at each stage.
+    try:
+        unprocessed = c.execute(
+            "SELECT COUNT(*) FROM raw_posts WHERE processed_at IS NULL"
+        ).fetchone()[0]
+        pending_llm = c.execute(
+            "SELECT COUNT(*) FROM raw_posts rp WHERE rp.processed_at IS NOT NULL "
+            "AND NOT EXISTS (SELECT 1 FROM post_processing_state pps "
+            "  WHERE pps.raw_post_id = rp.id AND pps.stage = 'llm')"
+        ).fetchone()[0]
+        pending_mitre = c.execute(
+            "SELECT COUNT(*) FROM post_processing_state pps_llm "
+            "WHERE pps_llm.stage = 'llm' AND NOT EXISTS ("
+            "  SELECT 1 FROM post_processing_state pps_m "
+            "  WHERE pps_m.raw_post_id = pps_llm.raw_post_id AND pps_m.stage='mitre')"
+        ).fetchone()[0]
+        out["checks"]["pipeline"] = {
+            "status": "up",
+            "pending_extraction": unprocessed,
+            "pending_llm": pending_llm,
+            "pending_mitre": pending_mitre,
+        }
+    except Exception as e:
+        out["checks"]["pipeline"] = {"status": "down", "error": str(e)}
+
+    return out
 
 
 @app.get("/entities")
