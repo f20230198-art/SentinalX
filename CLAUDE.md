@@ -41,7 +41,7 @@ This preference is also persisted in user-level memory (`feedback_learning_style
 
 ## 3. Project status — keep this section current
 
-**Last updated:** 2026-04-30 (**Stage 7 scaffolded.** Vite 6 + React 18 + TS + Tailwind v4 in `frontend/`. Violet palette (`#0A0612` base / `#13033b` deep / `#A78BFA` accent) wired via `@theme` block in `src/index.css`. Boot sequence + CRT toggle + cursor halo + scramble hook implemented. Home page renders hero, health grid, post-feed teaser, and top-techniques bar chart against the live Stage-6 API via `/api/*` proxy. Type-checks clean, dev server verified end-to-end. Routes for `/posts`, `/techniques`, `/investigations` are placeholders — those land in subsequent commits along with the horizontal Dark-style timeline. `STAGE_07_DESIGN.md` decisions locked.)
+**Last updated:** 2026-05-01 (**Stage 7 complete — Session C shipped.** All four Session C items are in: MITRE heatmap (`/techniques`), citation links in lens summaries (`/investigations`), watch indicator in the header, IOC pivot graph (`/iocs/:value`). Then a polish pass: vertical *Dark*-style timecord replaced the horizontal beeswarm timeline; global text contrast lifted; FeedTeaser black-title bug fixed; intent-tinted cards + color-coded health grid + gradient bars; spine shimmer + comet trail on live arrivals. Stage 7 LEARN doc written. Next: Stage 8 (PDF export per investigation + attack-graph polish).)
 
 ### Stages (8 total)
 
@@ -54,7 +54,7 @@ This preference is also persisted in user-level memory (`feedback_learning_style
 | 5 | MITRE ATT&CK ingest + vector index | ✅ complete   | ✅ `STAGE_05_LEARN.md`    |
 | 6 | FastAPI backend                   | ✅ complete   | ✅ `STAGE_06_LEARN.md`    |
 | 6.5 | Investigations + lenses + diagnostics | ✅ complete | ✅ `STAGE_06_5_LEARN.md` |
-| 7 | React/Vite/Tailwind frontend      | ⬜             | — (design: `STAGE_07_DESIGN.md`) |
+| 7 | React/Vite/Tailwind frontend      | ✅ complete   | ✅ `STAGE_07_LEARN.md`    |
 | 8 | PDF export + attack graph polish  | ⬜             | —                        |
 
 ### What is currently running / verified working
@@ -120,11 +120,62 @@ This preference is also persisted in user-level memory (`feedback_learning_style
   - **Verified 2026-04-30:** `/lenses` → 4 items. Created investigation with filter `{intent:'sale', q:'credential'}` + lens `ransomware` → `matched_total=6` (post ids 210, 162, 148, 123, 100, 30 — VPN-cred sales). `POST /investigations/1/rerun` ran in 36.78s on Mistral, returned a 1744-char ransomware-lens report with `[#post_id]` citations, IOCs correctly attributed back to source posts (e.g. `okta-sso.help` cited across all 6), and a MITRE chain grounded in techniques actually mapped to the post set. `last_run_at` / `summary_model='mistral'` / `summary_post_ids` persisted. Negative paths: invalid lens → 400; DELETE → 204; subsequent GET → 404. `/healthz/full` showed db/ollama/pipeline up, tor down (Docker stack not running — expected).
   - Filter SQL gotcha caught during build: original draft used two `args.insert(0, ...)` calls for `technique` and `ioc_type` JOIN bindings, which silently swapped them when both filters were set. Fix: maintain `join_args` and `where_args` as separate lists, return `join_args + where_args` so `?` placeholders stay aligned with their JOIN/WHERE order.
 
+- **Stage 7 frontend** (`cd frontend && npm run dev` → :5173; backend on :8765 must also be up):
+  - Stack: **Vite 6 + React 18 + TS + Tailwind v4 (beta)** with `@theme` tokens. Routes via `react-router-dom` v6. Data via TanStack Query. Animations via Framer Motion. **Three.js** for the WebGL background. **EventSource** for live SSE. d3-force is installed but unused (kept in `package.json` until session C decides whether to bring it back).
+  - **Visual identity (Session A done):**
+    - WebGL violet plasma shader (`src/components/ShaderBackground.tsx`) full-viewport plane running domain-warped fbm noise. Reacts to cursor (flow gets pulled toward pointer + violet halo) and to clicks (expanding shockwave ring). Pauses on `visibilitychange`, capped at 1.5x DPR.
+    - 5-phase boot sequence (`src/components/BootSequence.tsx`): static → iris-open → world-map with 8 pinging .onion hub nodes → 7 violet drips falling from top → glitch cut. **Single-fire** via module-scope `bootStarted`/`bootDone` flags (the React-StrictMode-safe pattern — refs and useEffect cleanup don't survive StrictMode's intentional double-mount, module globals do). Skip button + sessionStorage persistence.
+    - CRT/scanline toggle + cursor halo + grain overlay all wired in `src/index.css`.
+  - **Backend additions for the live timeline (in `backend/api/main.py`):**
+    - `GET /events` SSE endpoint. Polls SQLite every 2s for `id > since_id`, emits `event: post` frames with the post snapshot + its MITRE techniques (with `source` flag) + first 8 IOCs. 15s keepalive ping. **`since_id=0` means "replay everything"** (the timeline page bootstraps with this).
+    - **Bug fixed during build:** original SSE handler used `last = since_id or MAX(id)` — Python's falsy-zero made `since_id=0` resolve to `MAX(id)`, so bootstrap clients got nothing. Now: `last = since_id` (literal) and a separate `latest` variable powers the hello frame.
+    - Forum (`onion_service/app.py`) gained `POST /api/threads` for live demo injection — creates a thread + opening post atomically and returns the new ids. Scraper picks it up via Tor on the next poll. Forum container rebuilt 2026-04-30.
+  - **Live timeline (Session B done):**
+    - Route: `/posts` → `src/pages/Timeline.tsx`. Horizontal time spine, posts placed at x=lerp(`source_created_at`).
+    - **Beeswarm stacking** for same-day posts (vertical pile alternating above/below the spine, `STACK_GAP=16px`) so volume bursts read as vertical density.
+    - **Satellites hidden by default** — hover a post to fan out its top-8 MITRE techniques as a radial halo with T-codes labeled. Eliminates the "fishing net" mesh look that the d3-force version had.
+    - **Filter chips** at the top: `ALL · SALE · DISCUSSION · DOXXING · RECRUITMENT · WITH CVE · WITH BTC` with live counts. Non-matching posts dim to 12% opacity.
+    - **Live arrival animation** (4 violet rings expanding to 180px + central glow + `[NEW]` pill + `ArrivalBanner` flash above the timeline). Triggered by SSE post events OR by the `[REPLAY LIVE]` button (which re-fires the animation on the newest post — useful for demo when the pipeline isn't actively ingesting).
+    - **Click a post** → `DetailPanel` slides in from right with full `/posts/{id}` payload (body, summary, MITRE techniques, IOCs, entities).
+    - **Verified 2026-04-30:** posted "LIVE DEMO: 0day in Cisco IOS XE — selling" via `docker exec sentinelx-forum python` → `POST /api/threads` → ran scraper/extract/llm/mitre — post #236 appeared end-to-end with intent=sale, IOCs (BTC wallet + 185.220.101.45), techniques (T1053/T1078/T1566).
+- **Stage 7 Session C + polish (shipped 2026-05-01):**
+  - **MITRE heatmap** — `frontend/src/pages/Heatmap.tsx` at `/techniques`. Splits the 14 Enterprise tactics into 2 rows of 7 (Pre-compromise→Foothold / Operate→Objective). Cells shaded by `post_count` (log-scaled violet alpha). Click cell → side panel listing the technique's posts; click a post → shared `DetailPanel`.
+  - **Citation links** — `frontend/src/components/CitationText.tsx`. Regex-splits lens summaries on `[#NNN]`, renders each match as an inline button that opens `DetailPanel`. Used by `frontend/src/pages/Investigations.tsx` (also new), which has a left-list / right-detail layout, a create form (name + lens picker + intent/keyword filter), and `[ RERUN ] [ DELETE ]` actions.
+  - **Watch indicator** — `frontend/src/components/WatchIndicator.tsx` mounted in `Shell.tsx` header. Polls `/healthz/full` every 12s. Surfaces a status pill (IDLE / PROCESSING · N q / DEGRADED) plus a hover popover with per-check status + per-stage pending counts.
+  - **IOC pivot graph** — `frontend/src/pages/IocPivot.tsx` at `/iocs/:value` (URL-encoded). Reintroduces `d3-force` (single sim, capped at 30 posts). Center node = the IOC, satellites = posts that mention it; co-occurring IOCs across the matched set rendered below as clickable pivot chips. IOC chips inside `DetailPanel` are now `<Link>`s into this view.
+  - **Vertical timecord (replaced horizontal beeswarm)** — full rewrite of `Timeline.tsx`. Single glowing violet thread runs top→bottom (radial gradient + outer glow). Day pills float on the spine; posts branch alternately right ↔ left as content cards (id, category, time, intent, title, top-6 MITRE T-codes). Newest day on top. Reads top-down like a feed, no longer dots-on-a-ruler. SSE bootstrap, filter chips, hover-to-see-techniques, click-to-open-panel, and `[ REPLAY LIVE ]` all preserved.
+  - **Live-arrival flair on the timecord** — `SpineShimmer` (a bright violet pulse races top→bottom along the spine when `arrivingIds` is non-empty) + a comet-trail tail under each pulsing node. Both Framer Motion, no new deps.
+  - **Global contrast pass** — `index.css` lifted `--color-text` to `#f4f2fb` and `--color-text-muted` to `#a8a0c4`. Added `.grain::after` radial dim veil between the WebGL shader and content so long-form text stays legible. Added an `h1–h6 { color: var(--color-text); }` reset to fix a Tailwind v4 quirk where headings were inheriting browser-default black (the FeedTeaser titles were literally invisible — fix is permanent now).
+  - **Color polish** — Hero stat cards have a violet left-edge stripe + inner glow. Health grid is color-coded per service (db=violet, ollama=green, tor=cyan, pipeline=amber). Top-techniques bars are gradient + halo. Section dividers use a horizontal violet→border gradient hairline. FeedTeaser cards have intent-tinted left borders.
+  - **DetailPanel was extracted** to `frontend/src/components/DetailPanel.tsx` (was inline in Timeline) — now reused by `Heatmap`, `Investigations`, `IocPivot`, and `Timeline`.
+  - **Verified 2026-05-01:** typecheck clean across all routes (`npx tsc -b --noEmit`). User paged through all four routes against the live backend; SSE replay still triggers the spine shimmer.
+
+**Demo loop reminder for the user (already verified, just paste):**
+```
+docker exec sentinelx-forum python -c "<json POST /api/threads>"
+backend/.venv/Scripts/python.exe -m backend.scraper.run --once
+backend/.venv/Scripts/python.exe -m backend.pipeline.run --once
+backend/.venv/Scripts/python.exe -m backend.llm.run --once
+backend/.venv/Scripts/python.exe -m backend.mitre.run --once
+```
+The four pipeline stages also have `--watch` modes; bundling them into one script is a one-liner the user has been offered but hasn't decided on yet.
+
+### Stage 8 — entry point for the next Claude
+
+**You are picking up Stage 8.** Stages 1–7 are all complete and verified. The frontend is feature-complete for the demo path. Stage 8 has two halves:
+
+1. **PDF export per investigation.** Add a `POST /investigations/{id}/export` endpoint that renders a styled PDF using WeasyPrint (already in `TECHNICAL_PRIMER.md` as the chosen lib). Contents: investigation metadata (name, description, lens, filter), the lens summary with `[#NNN]` rendered as footnote-style references, the cited posts (full body + IOCs + MITRE techniques) as appendices, and a one-page MITRE coverage chart. Frontend: add a `[ EXPORT PDF ]` button next to `[ RERUN ]` in `Investigations.tsx` that hits the endpoint and downloads.
+2. **Attack graph polish.** The current attack graph is the IOC pivot at `/iocs/:value` (d3-force). Stage 8's polish brief: a "case file" graph view that combines IOC + MITRE + post nodes for a *given investigation* (i.e. the matched post set), so the analyst can see clusters in one canvas. Reuse `d3-force`. Optional but defensible — the demo already has the per-IOC pivot; this is the bigger-picture overlay.
+
+**Do PDF export first** — it's the headline feature in the original `TECHNICAL_PRIMER.md` and the more concrete deliverable.
+
+**Stage 8 deps to install (from repo root, in `backend/.venv`):** `weasyprint==62.3` (pulls cairo bindings — on Windows this needs GTK runtime; if it bites, fall back to `pdfkit` + wkhtmltopdf). Add to a new `backend/requirements.txt` while you're at it; deps have outgrown ad-hoc installs.
+
 ### What is NOT yet done
 
-- All seven LEARN docs (Stages 1–6 + 6.5) shipped. If voice tweaks come up, apply uniformly.
-- No git commit has been made for Stage 2 / 3 / 4 / 5 / 6 / 6.5 / async-refactor / LEARN-rewrites yet beyond the existing `82470de stage 3` commit. User commits explicitly (CLAUDE.md §8).
-- Stage 7 — React + Vite + Tailwind frontend. Will consume the Stage-6 + 6.5 API and render the dashboard (post list, post detail, technique browser, stats panel, **saved-investigations sidebar**, **lens selector**, **health card**, attack-graph placeholder). Design brief in `STAGE_07_DESIGN.md` (dark Avinyr-meets-Dark-Netflix aesthetic, auto-building timeline). Do NOT start without explicit user go-ahead.
+- All eight LEARN docs (Stages 1–7 + 6.5) shipped.
+- No git commit has been made beyond `cde9ba4 intial Frontend`. User commits explicitly (CLAUDE.md §8). Stages 4–7 are all uncommitted at this point — flag at next commit pass.
+- **Stage 8** — PDF export per investigation (WeasyPrint, one PDF per investigation including lens summary + cited posts + IOCs + MITRE map) + attack-graph polish. Untouched. Entry point at §3.5 below.
 
 ### Performance ceiling for Stage 4 (so the next session doesn't re-attempt async)
 

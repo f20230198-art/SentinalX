@@ -1,17 +1,20 @@
 import { useState } from "react";
 import { Route, Routes } from "react-router-dom";
 import { BootSequence } from "./components/BootSequence";
+import { ShaderBackground } from "./components/ShaderBackground";
 import { Header } from "./components/Shell";
 import { Home } from "./pages/Home";
-import { Placeholder } from "./pages/Placeholder";
-import { useCursorHalo } from "./hooks/useCursorHalo";
+import { Timeline } from "./pages/Timeline";
+import { Heatmap } from "./pages/Heatmap";
+import { Investigations } from "./pages/Investigations";
+import { IocPivot } from "./pages/IocPivot";
 
 export default function App() {
   const [booted, setBooted] = useState(false);
-  useCursorHalo();
 
   return (
-    <div className="grain cursor-halo min-h-screen">
+    <div className="grain min-h-screen">
+      <ShaderBackground />
       <BootSequence onDone={() => setBooted(true)} />
       <div
         style={{ visibility: booted ? "visible" : "hidden" }}
@@ -21,18 +24,10 @@ export default function App() {
         <main>
           <Routes>
             <Route path="/" element={<Home />} />
-            <Route
-              path="/posts"
-              element={<Placeholder index="02" title="Intelligence feed" />}
-            />
-            <Route
-              path="/techniques"
-              element={<Placeholder index="03" title="Mitre browser" />}
-            />
-            <Route
-              path="/investigations"
-              element={<Placeholder index="04" title="Investigations" />}
-            />
+            <Route path="/posts" element={<Timeline />} />
+            <Route path="/techniques" element={<Heatmap />} />
+            <Route path="/investigations" element={<Investigations />} />
+            <Route path="/iocs/:value" element={<IocPivot />} />
           </Routes>
         </main>
       </div>

@@ -98,12 +98,13 @@ function Stat({
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.4 }}
-      className="border border-border-soft bg-surface-1/60 px-5 py-4"
+      className="border border-border-soft border-l-2 border-l-accent bg-surface-1/70 backdrop-blur-sm px-5 py-4 hover:border-accent/60 transition-colors"
+      style={{ boxShadow: "inset 0 0 24px rgba(167,139,250,0.08)" }}
     >
       <div className="font-mono text-[10px] tracking-[0.2em] text-text-muted">
         {label}
       </div>
-      <div className="font-display text-3xl mt-1 tabular-nums">
+      <div className="font-display text-3xl mt-1 tabular-nums text-text">
         {loading ? "—" : value.toLocaleString()}
       </div>
     </motion.div>
@@ -117,16 +118,25 @@ function HealthGrid({
   data: import("../lib/api").HealthFull | undefined;
   loading: boolean;
 }) {
-  const ORDER = ["db", "ollama", "tor_socks", "pipeline"];
+  const ORDER: { key: string; tint: string }[] = [
+    { key: "db", tint: "rgb(167,139,250)" },
+    { key: "ollama", tint: "rgb(110,231,183)" },
+    { key: "tor_socks", tint: "rgb(125,211,252)" },
+    { key: "pipeline", tint: "rgb(232,163,61)" },
+  ];
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-      {ORDER.map((k) => {
+      {ORDER.map(({ key: k, tint }) => {
         const c = data?.checks[k];
         const up = c?.status === "up";
         return (
           <div
             key={k}
-            className="border border-border-soft bg-surface-1/40 px-4 py-4"
+            className="border border-border-soft bg-surface-1/60 backdrop-blur-sm px-4 py-4 transition-colors hover:bg-surface-1/80"
+            style={{
+              borderLeft: `2px solid ${up ? tint : "rgba(229,72,77,0.7)"}`,
+              boxShadow: up ? `inset 0 0 18px ${tint}1a` : undefined,
+            }}
           >
             <div className="flex items-center gap-2 mb-2">
               <span
@@ -134,15 +144,26 @@ function HealthGrid({
                   loading
                     ? "bg-text-muted animate-pulse"
                     : up
-                    ? "bg-accent shadow-[0_0_6px_var(--color-accent)]"
+                    ? ""
                     : "bg-danger"
                 }`}
+                style={
+                  up
+                    ? {
+                        backgroundColor: tint,
+                        boxShadow: `0 0 6px ${tint}`,
+                      }
+                    : undefined
+                }
               />
               <span className="font-mono text-[10px] tracking-[0.2em] text-text-muted uppercase">
                 {k}
               </span>
             </div>
-            <div className="font-mono text-sm">
+            <div
+              className="font-mono text-sm"
+              style={{ color: up ? tint : undefined }}
+            >
               {loading ? "…" : up ? "ONLINE" : "DOWN"}
             </div>
             {c?.latency_ms !== undefined && (
@@ -171,26 +192,38 @@ function FeedTeaser() {
     return <div className="font-mono text-xs text-text-muted">loading feed…</div>;
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-      {posts.data?.items.map((p) => (
-        <article
-          key={p.id}
-          className="border border-border-soft bg-surface-1/40 p-4 hover:border-accent/50 transition-colors"
-        >
-          <div className="flex items-center gap-2 font-mono text-[10px] tracking-[0.15em] text-text-muted">
-            <span className="text-accent">#{p.id}</span>
-            <span>{p.category.toUpperCase()}</span>
-            {p.intent && (
-              <span className="ml-auto text-warn">{p.intent.toUpperCase()}</span>
-            )}
-          </div>
-          <h3 className="font-display text-base mt-2 leading-tight">
-            {p.thread_title}
-          </h3>
-          <p className="mt-2 text-xs text-text-muted line-clamp-3">
-            {p.summary || p.body_preview}
-          </p>
-        </article>
-      ))}
+      {posts.data?.items.map((p) => {
+        const intentTint =
+          p.intent === "sale"
+            ? "border-l-warn"
+            : p.intent === "doxxing"
+            ? "border-l-danger"
+            : p.intent === "recruitment"
+            ? "border-l-[rgb(125,211,252)]"
+            : "border-l-accent";
+        return (
+          <article
+            key={p.id}
+            className={`border border-border-soft border-l-2 ${intentTint} bg-surface-1/60 backdrop-blur-sm p-4 hover:border-accent/60 hover:bg-surface-1/80 transition-colors`}
+          >
+            <div className="flex items-center gap-2 font-mono text-[10px] tracking-[0.15em] text-text-muted">
+              <span className="text-accent">#{p.id}</span>
+              <span>{p.category.toUpperCase()}</span>
+              {p.intent && (
+                <span className="ml-auto text-warn">
+                  {p.intent.toUpperCase()}
+                </span>
+              )}
+            </div>
+            <h3 className="font-display text-base mt-2 leading-tight text-text">
+              {p.thread_title}
+            </h3>
+            <p className="mt-2 text-xs text-text-muted line-clamp-3">
+              {p.summary || p.body_preview}
+            </p>
+          </article>
+        );
+      })}
     </div>
   );
 }
@@ -212,10 +245,15 @@ function TopTechniques({
         >
           <span className="col-span-2 text-accent">{t.technique_id}</span>
           <span className="col-span-6 text-text truncate">{t.name ?? "—"}</span>
-          <div className="col-span-3 h-1 bg-surface-2 relative">
+          <div className="col-span-3 h-1.5 bg-surface-2/60 relative overflow-hidden">
             <div
-              className="absolute left-0 top-0 bottom-0 bg-accent/70"
-              style={{ width: `${(t.n / max) * 100}%` }}
+              className="absolute left-0 top-0 bottom-0"
+              style={{
+                width: `${(t.n / max) * 100}%`,
+                background:
+                  "linear-gradient(to right, rgba(167,139,250,0.5), rgb(167,139,250))",
+                boxShadow: "0 0 8px rgba(167,139,250,0.6)",
+              }}
             />
           </div>
           <span className="col-span-1 text-right text-text-muted tabular-nums">

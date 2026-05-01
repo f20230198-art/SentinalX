@@ -82,6 +82,19 @@ export interface HealthFull {
   >;
 }
 
+export interface TimelinePost {
+  id: number;
+  thread_title: string;
+  category: string;
+  author: string;
+  body_preview: string;
+  source_created_at: number;
+  intent: string | null;
+  summary: string | null;
+  techniques: { technique_id: string; source: string; name: string | null }[];
+  iocs: { ioc_type: string; value: string }[];
+}
+
 export interface Lens {
   name: string;
   label: string;
@@ -104,12 +117,90 @@ export interface Investigation {
   matched_posts?: PostListItem[];
 }
 
+export interface PostDetail {
+  post: {
+    id: number;
+    thread_title: string;
+    category: string;
+    author: string;
+    body: string;
+    source_created_at: number;
+  };
+  analysis: {
+    intent: string | null;
+    summary: string | null;
+    targets: unknown;
+    techniques: unknown;
+  } | null;
+  iocs: { ioc_type: string; value: string }[];
+  entities: { label: string; text: string }[];
+  techniques: {
+    technique_id: string;
+    source: string;
+    score: number | null;
+    name: string | null;
+    tactics: string[] | null;
+  }[];
+}
+
+export interface TechniqueListItem {
+  technique_id: string;
+  name: string | null;
+  tactics: string[] | null;
+  url: string | null;
+  is_subtechnique: number;
+  parent_id: string | null;
+  post_count: number;
+}
+
+export interface TechniqueList {
+  total: number;
+  limit: number;
+  offset: number;
+  items: TechniqueListItem[];
+}
+
+export interface TechniqueDetail {
+  technique_id: string;
+  name: string | null;
+  description: string | null;
+  tactics: string[] | null;
+  url: string | null;
+  is_subtechnique: number;
+  parent_id: string | null;
+  posts: {
+    raw_post_id: number;
+    source: string;
+    score: number | null;
+    thread_title: string;
+    category: string;
+  }[];
+}
+
+export interface IocAggItem {
+  ioc_type: string;
+  value: string;
+  occurrences: number;
+  post_ids: number[];
+}
+
+export interface IocList {
+  total: number;
+  limit: number;
+  offset: number;
+  items: IocAggItem[];
+}
+
 export const api = {
   healthz: () => get<{ status: string }>("/healthz"),
   healthzFull: () => get<HealthFull>("/healthz/full"),
   stats: () => get<Stats>("/stats"),
   posts: (params?: Record<string, unknown>) => get<PostList>("/posts", params),
-  post: (id: number) => get<unknown>(`/posts/${id}`),
+  post: (id: number) => get<PostDetail>(`/posts/${id}`),
+  techniques: (params?: Record<string, unknown>) =>
+    get<TechniqueList>("/techniques", params),
+  technique: (id: string) => get<TechniqueDetail>(`/techniques/${id}`),
+  iocs: (params?: Record<string, unknown>) => get<IocList>("/iocs", params),
   lenses: () => get<{ items: Lens[] }>("/lenses"),
   investigations: () => get<{ items: Investigation[] }>("/investigations"),
   investigation: (id: number) => get<Investigation>(`/investigations/${id}`),
@@ -120,4 +211,9 @@ export const api = {
     lens?: string;
   }) => post<Investigation>("/investigations", body),
   rerun: (id: number) => post<Investigation>(`/investigations/${id}/rerun`, {}),
+  deleteInvestigation: async (id: number): Promise<void> => {
+    const r = await fetch(`${BASE}/investigations/${id}`, { method: "DELETE" });
+    if (!r.ok && r.status !== 204)
+      throw new Error(`${r.status} ${r.statusText}`);
+  },
 };

@@ -1,5 +1,6 @@
 import { Link, NavLink } from "react-router-dom";
 import { useCrtMode } from "../hooks/useCrtMode";
+import { WatchIndicator } from "./WatchIndicator";
 
 const NAV = [
   { to: "/", label: "[01] CONSOLE" },
@@ -34,7 +35,8 @@ export function Header() {
             </NavLink>
           ))}
         </nav>
-        <div className="ml-auto flex items-center gap-4">
+        <div className="ml-auto flex items-center gap-3">
+          <WatchIndicator />
           <button
             onClick={toggleCrt}
             className={`font-mono text-[10px] tracking-[0.2em] border px-3 py-1.5 transition-colors ${

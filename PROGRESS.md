@@ -438,3 +438,116 @@ I rewrote `STAGE_01_LEARN.md` end-to-end as the template for the rewrite voice. 
 - Resume by writing `STAGE_01_LEARN.md`. Cover every file under `onion_service/`, `tor_config/`, and `docker-compose.yml`. The user wants exhaustive — don't be terse. Sections to include: what was built, how each piece works (line-level when interesting), why this choice over alternatives, the tech stack with industry context (where Flask, gunicorn, Tor hidden services, Docker bind mounts, SQLite, Jinja2 are used in real CTI tooling), and the gotchas we hit.
 - After that, mark Stage 1 ✅ in CLAUDE.md §3 and proceed to Stage 2 (Tor scraper) only when the user gives the go-ahead.
 - Do NOT auto-commit. User commits explicitly.
+
+---
+
+## 2026-05-01 — Stage 7 closed
+
+> NOTE: this entry covers Stage 7 only. PROGRESS.md is missing entries for
+> Stages 2–6 + 6.5 (the user noticed the gap in this session). CLAUDE.md §3
+> is the authoritative log for the missing stages — it has been kept current
+> throughout. A future session should backfill PROGRESS.md from CLAUDE.md
+> when there's time.
+
+**What landed across the three Stage 7 sessions (full picture):**
+
+Sessions A + B (shipped 2026-04-30, documented in CLAUDE.md §3 prior to this
+entry): Vite 6 + React 18 + TS + Tailwind v4 scaffold; WebGL violet plasma
+shader background (`ShaderBackground.tsx`, three.js, fbm domain-warped noise
+reacting to cursor + clicks); 5-phase boot sequence (`BootSequence.tsx`,
+StrictMode-safe single-fire via module flags); horizontal beeswarm timeline
+with SSE bootstrap (`/api/events?since_id=0`) + live arrival rings; backend
+SSE endpoint (replays at `since_id=0`, 2s polling, 15s keepalive — fixed a
+falsy-zero bug where `since_id or MAX(id)` resolved 0 to the latest id);
+forum gained `POST /api/threads` for live demo injection.
+
+Session C (this session, all four items shipped):
+
+- **MITRE heatmap** at `/techniques`. Plan called for one row of 14 columns;
+  refactored to 7+7 (Pre-compromise→Foothold / Operate→Objective) on user
+  feedback — much more breathable. Cells shaded by `post_count` on a log
+  scale (`shade()` helper, alpha 0.12–0.90). Multi-tactic techniques appear
+  in every relevant column. Click cell → side panel (description + post
+  list); click a post → shared `DetailPanel`. New API: `api.techniques()`,
+  `api.technique(id)` plus `TechniqueListItem` / `TechniqueDetail` types.
+- **Citation links** in lens summaries. New `CitationText` component splits
+  on `/\[#(\d+)\]/g` and renders each match as an inline `<button>` that
+  opens `DetailPanel`. New `Investigations.tsx` page (the route was a
+  Placeholder before): list (left) / detail (right), create form with name +
+  lens picker + intent/keyword filter, `[ RERUN ] [ DELETE ]` actions. Added
+  `api.deleteInvestigation(id)`.
+- **Watch indicator** in the header. New `WatchIndicator` component polls
+  `/healthz/full` every 12s. Pill: `IDLE` / `PROCESSING · N q` / `DEGRADED`.
+  Hover popover shows db / ollama / tor latencies + per-stage pending
+  counts. Mounted in `Shell.tsx` next to `[ CRT ]`.
+- **IOC pivot graph** at `/iocs/:value` (URL-encoded). Reintroduced
+  `d3-force` (already in `package.json`). Center IOC node + post satellites,
+  capped at 30 posts. Co-occurring IOCs across the matched set listed below
+  as clickable pivot chips so the analyst can chain pivots through the
+  corpus. IOC chips inside `DetailPanel` are now `<Link>`s into this view.
+
+Polish pass (after Session C, on user request):
+
+- **Vertical timecord (replaced the horizontal beeswarm).** User said the
+  horizontal version "kind of hard to understand it's a timeline" and asked
+  for something more *Dark*-inspired. Full rewrite of `Timeline.tsx`: single
+  glowing violet thread runs top→bottom (gradient + outer glow), day pills
+  float on the spine, posts branch alternately right ↔ left as content cards
+  (id / category / time / intent badge / title / first 6 MITRE T-codes).
+  Newest day on top; reads top-down like a feed. SSE bootstrap, filter
+  chips, hover-for-techniques, click-for-DetailPanel, `[ REPLAY LIVE ]` —
+  all preserved.
+- **Live-arrival flair on the timecord.** `SpineShimmer` motion element
+  travels top→bottom along the spine (1.6s) when `arrivingIds` is non-empty
+  — the cord literally flashes with new signal. Each pulsing node also
+  drops a fading violet comet trail (4s). Both Framer Motion, no new deps.
+  (User asked about GSAP for the boot — recommended against on bundle-size +
+  two-systems grounds; added these effects instead.)
+- **Global text contrast.** `--color-text` lifted `#e6e3f0 → #f4f2fb`,
+  `--color-text-muted` lifted `#7a7090 → #a8a0c4` (much more legible over
+  the shader). Added `.grain::after` radial dim veil between the WebGL
+  shader and content. Added `h1–h6 { color: var(--color-text); }` reset to
+  fix a Tailwind v4 quirk where headings inherited browser-default black —
+  the FeedTeaser thread titles on the Home page were *literally invisible*
+  in the screenshot the user sent. Permanent fix.
+- **Color polish across Home.** Hero stat cards: violet left-edge stripe +
+  inner glow. Health grid: per-service color tags (db=violet, ollama=green,
+  tor=cyan, pipeline=amber). Top-techniques bars: violet gradient + halo.
+  Section dividers: violet→border gradient hairline. FeedTeaser cards:
+  intent-tinted left borders.
+- **Refactor:** extracted `DetailPanel` + `TECH_COLOR` from `Timeline.tsx`
+  to `frontend/src/components/DetailPanel.tsx`. Now reused by `Heatmap`,
+  `Investigations`, `IocPivot`, and `Timeline`.
+
+**Verified by running:**
+- `npx tsc -b --noEmit` clean throughout (ran after every component).
+- All four routes (`/`, `/posts`, `/techniques`, `/investigations`,
+  `/iocs/:value`) load against the live backend on `:8765`.
+- SSE bootstrap still replays the 235+ archived posts; `[ REPLAY LIVE ]`
+  triggers the spine shimmer + comet trail on the most recent node.
+- Investigation create + rerun flow exercised; `[#NNN]` citations render as
+  buttons and opening `DetailPanel`.
+- Heatmap cells shade correctly; hovering confirms `post_count` matches the
+  legend.
+- IOC pivot from a `DetailPanel` IOC chip lands at the right URL and the
+  d3 sim settles cleanly.
+
+**Stage exit checklist (per CLAUDE.md §5):**
+- [x] Code works end-to-end (verified above).
+- [x] `STAGE_07_LEARN.md` written at the repo root, exhaustive.
+- [x] `CLAUDE.md` §3 updated.
+- [x] `PROGRESS.md` has this entry.
+- [ ] Git commit — **deferred to user**. Note: stages 4–7 are all
+  uncommitted (last commit was `cde9ba4 intial Frontend`). One commit
+  bundling everything since then would be the natural pass.
+
+**Handoff to next Claude:**
+- Stage 7 is closed. Frontend is feature-complete for the demo path.
+- Next: **Stage 8** (PDF export per investigation + attack-graph polish).
+  Entry-point checklist is in CLAUDE.md §3.5. Do PDF export first.
+- Don't touch Stage 7 work unless user explicitly asks. The vertical
+  timecord, contrast tokens, color polish, and watch indicator are settled.
+- The PROGRESS.md gap (missing Stages 2–6 entries) is not a blocker — those
+  stages are documented in CLAUDE.md §3 and in their respective LEARN docs.
+  Backfill if you have time but don't let it delay Stage 8.
+- User did not ask to commit during this session; do not commit unprompted.

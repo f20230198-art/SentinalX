@@ -19,9 +19,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import Body, FastAPI, HTTPException, Query
+import asyncio
+
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 
 from backend.api import investigations as inv
 from backend.llm.lenses import LENSES, list_lenses
@@ -444,6 +446,105 @@ def healthz_full() -> dict[str, Any]:
         out["checks"]["pipeline"] = {"status": "down", "error": str(e)}
 
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Server-sent events (live timeline feed)
+# --------------------------------------------------------------------------- #
+
+# Snapshot of a post for the SSE wire format. Kept tight on purpose — the
+# timeline only needs enough to draw a node and its first technique edges.
+def _post_event(c: sqlite3.Connection, post_id: int) -> dict[str, Any]:
+    row = c.execute(
+        "SELECT rp.id, rp.thread_title, rp.category, rp.author, "
+        "  substr(rp.body, 1, 240) AS body_preview, rp.source_created_at, "
+        "  la.intent, la.summary "
+        "FROM raw_posts rp LEFT JOIN llm_analyses la ON la.raw_post_id = rp.id "
+        "WHERE rp.id = ?",
+        (post_id,),
+    ).fetchone()
+    if not row:
+        return {"id": post_id, "missing": True}
+    out = _row_to_dict(row)
+    techs = c.execute(
+        "SELECT pt.technique_id, pt.source, mt.name FROM post_techniques pt "
+        "LEFT JOIN mitre_techniques mt ON mt.technique_id = pt.technique_id "
+        "WHERE pt.raw_post_id = ? "
+        "ORDER BY CASE pt.source WHEN 'llm_verified' THEN 0 "
+        "  WHEN 'semantic' THEN 1 ELSE 2 END",
+        (post_id,),
+    ).fetchall()
+    out["techniques"] = [
+        {"technique_id": r["technique_id"], "source": r["source"], "name": r["name"]}
+        for r in techs
+    ]
+    iocs = c.execute(
+        "SELECT ioc_type, value FROM iocs WHERE raw_post_id = ? "
+        "ORDER BY ioc_type LIMIT 8",
+        (post_id,),
+    ).fetchall()
+    out["iocs"] = [{"ioc_type": r["ioc_type"], "value": r["value"]} for r in iocs]
+    return out
+
+
+@app.get("/events")
+async def events_stream(request: Request, since_id: int = Query(0, ge=0)):
+    """Server-sent stream of newly-ingested posts.
+
+    Implementation note: we poll SQLite every 2s for `id > since_id` rather
+    than wiring a real pub-sub. Reasons: (1) the scraper is the sole writer
+    and we don't want the API process tapping into its connection; (2) at
+    SentinelX's scale (one post every few seconds at most), polling cost is
+    invisible; (3) SSE clients survive transient hiccups via EventSource's
+    built-in reconnect.
+
+    Frame types:
+        event: hello   data: {"latest_id": N}              # on connect
+        event: post    data: {"id": N, ...post snapshot}   # per new post
+        event: ping    data: {"t": <epoch>}                # keepalive every 15s
+    """
+
+    async def gen():
+        c = app.state.conn
+        # since_id == 0 (the default) means "replay everything from the
+        # start" — the timeline page uses this to bootstrap. Any positive
+        # value is treated as "resume after this id".
+        last = since_id
+        latest = c.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM raw_posts"
+        ).fetchone()[0]
+        yield f"event: hello\ndata: {json.dumps({'latest_id': latest})}\n\n"
+
+        last_ping = asyncio.get_event_loop().time()
+        while True:
+            if await request.is_disconnected():
+                break
+
+            rows = c.execute(
+                "SELECT id FROM raw_posts WHERE id > ? ORDER BY id ASC LIMIT 50",
+                (last,),
+            ).fetchall()
+            for row in rows:
+                payload = _post_event(c, row["id"])
+                yield f"event: post\ndata: {json.dumps(payload)}\n\n"
+                last = row["id"]
+
+            now = asyncio.get_event_loop().time()
+            if now - last_ping > 15:
+                yield f"event: ping\ndata: {json.dumps({'t': now})}\n\n"
+                last_ping = now
+
+            await asyncio.sleep(2.0)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # disable nginx-style buffering if any
+        },
+    )
 
 
 @app.get("/entities")

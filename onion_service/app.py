@@ -179,6 +179,53 @@ def api_posts():
     )
 
 
+@app.route("/api/threads", methods=["POST"])
+def api_create_thread():
+    """Create a new thread + opening post in one shot.
+
+    Used by the demo flow to inject fresh content during a live walkthrough,
+    so the rest of the SentinelX pipeline (scrape → extract → LLM → MITRE
+    → timeline) can light up against genuinely new data instead of replaying
+    the seed corpus.
+
+    Body:
+        {
+          "title":    str,
+          "category": str   # one of the 5 seeded categories
+          "author":   str,
+          "body":     str
+        }
+    """
+    data = request.get_json(silent=True) or {}
+    required = ("title", "category", "author", "body")
+    missing = [k for k in required if not data.get(k)]
+    if missing:
+        return jsonify({"error": f"missing: {', '.join(missing)}"}), 400
+
+    now = datetime.now(timezone.utc).timestamp()
+    db = get_db()
+    cur = db.execute(
+        "INSERT INTO threads (title, category, author, created_at) "
+        "VALUES (?, ?, ?, ?)",
+        (data["title"], data["category"], data["author"], now),
+    )
+    thread_id = cur.lastrowid
+    cur = db.execute(
+        "INSERT INTO posts (thread_id, author, body, created_at) "
+        "VALUES (?, ?, ?, ?)",
+        (thread_id, data["author"], data["body"], now),
+    )
+    post_id = cur.lastrowid
+    db.commit()
+    return jsonify(
+        {
+            "thread_id": thread_id,
+            "post_id": post_id,
+            "created_at": now,
+        }
+    ), 201
+
+
 @app.route("/api/post/<int:post_id>")
 def api_post(post_id: int):
     db = get_db()
