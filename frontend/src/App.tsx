@@ -8,6 +8,7 @@ import { Timeline } from "./pages/Timeline";
 import { Heatmap } from "./pages/Heatmap";
 import { Investigations } from "./pages/Investigations";
 import { IocPivot } from "./pages/IocPivot";
+import { CaseGraph } from "./pages/CaseGraph";
 
 export default function App() {
   const [booted, setBooted] = useState(false);
@@ -28,6 +29,10 @@ export default function App() {
             <Route path="/techniques" element={<Heatmap />} />
             <Route path="/investigations" element={<Investigations />} />
             <Route path="/iocs/:value" element={<IocPivot />} />
+            <Route
+              path="/investigations/:id/graph"
+              element={<CaseGraph />}
+            />
           </Routes>
         </main>
       </div>

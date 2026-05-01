@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { TimelinePost } from "../lib/api";
+import { API_BASE, type TimelinePost } from "../lib/api";
 
 /**
  * Subscribe to /api/events (SSE). Pass `sinceId` to seed the stream — the
@@ -15,7 +15,7 @@ export function useLivePosts(sinceId: number | null): TimelinePost[] {
 
   useEffect(() => {
     if (sinceId === null) return;
-    const url = `/api/events?since_id=${sinceId}`;
+    const url = `${API_BASE}/events?since_id=${sinceId}`;
     const es = new EventSource(url);
 
     const onPost = (ev: MessageEvent) => {

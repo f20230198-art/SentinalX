@@ -16,6 +16,8 @@ backend/.venv/
 *.db
 *.sqlite
 *.sqlite3
+# ...except the pre-enriched demo DB that ships with the deploy.
+!backend/db/sentinelx.db
 
 # Node / frontend
 node_modules/

@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "framer-motion";
 import { api, type Investigation, type Lens } from "../lib/api";
@@ -252,6 +253,22 @@ function InvestigationDetail({
               >
                 [ {rerunLoading ? "RUNNING…" : "RERUN"} ]
               </button>
+              <Link
+                to={`/investigations/${data.id}/graph`}
+                className="font-mono text-[10px] tracking-[0.2em] border border-border-soft px-2 py-1 hover:text-accent hover:border-accent transition-colors"
+                title="view the case-file graph (posts + IOCs + MITRE)"
+              >
+                [ CASE GRAPH ]
+              </Link>
+              <a
+                href={api.exportInvestigationUrl(data.id)}
+                target="_blank"
+                rel="noreferrer"
+                className="font-mono text-[10px] tracking-[0.2em] border border-border-soft px-2 py-1 hover:text-accent hover:border-accent transition-colors"
+                title="download a styled PDF of this investigation"
+              >
+                [ EXPORT PDF ]
+              </a>
               <button
                 onClick={onDelete}
                 className="font-mono text-[10px] tracking-[0.2em] border border-border-soft px-2 py-1 hover:text-danger hover:border-danger transition-colors"

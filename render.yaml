@@ -1,0 +1,32 @@
+# Render blueprint: one-click deploy of the SentinelX I FastAPI backend.
+#
+# Notes:
+# - The free plan spins the service down after 15 min of inactivity. First
+#   request after a cold start takes ~30-60s. That's acceptable for a judge
+#   demo; pre-warm by visiting /healthz before showing the dashboard.
+# - SQLite ships with the deploy. The pre-enriched 235-post DB is committed
+#   under backend/db/sentinelx.db, so the backend has data on day one.
+# - WeasyPrint needs the GTK runtime, which Render's Python runtime image
+#   does NOT include. The PDF export endpoint will return 500 in production.
+#   For the demo it works locally; productionising would mean a Docker
+#   service spec instead of `runtime: python`.
+# - Ollama and Tor are NOT here. They run on the demo laptop only.
+
+services:
+  - type: web
+    name: sentinelx-api
+    runtime: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: uvicorn backend.api.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.4
+      - key: SENTINELX_DB_PATH
+        value: backend/db/sentinelx.db
+      - key: CORS_ORIGINS
+        # Set this to your Vercel domain after the frontend is deployed,
+        # e.g. https://sentinelx.vercel.app
+        sync: false
+    healthCheckPath: /healthz

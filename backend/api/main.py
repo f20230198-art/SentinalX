@@ -14,6 +14,7 @@ Run:
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -28,7 +29,19 @@ from fastapi.responses import Response, StreamingResponse
 from backend.api import investigations as inv
 from backend.llm.lenses import LENSES, list_lenses
 
-DB_PATH = Path(__file__).resolve().parents[1] / "db" / "sentinelx.db"
+# Env-driven config so the same code runs on a laptop and on Render.
+DB_PATH = Path(
+    os.environ.get(
+        "SENTINELX_DB_PATH",
+        str(Path(__file__).resolve().parents[1] / "db" / "sentinelx.db"),
+    )
+)
+# Comma-separated allow-list. Default is "*" so local dev keeps working; on
+# Render set CORS_ORIGINS to e.g. "https://sentinelx.vercel.app,http://localhost:5173".
+_cors_raw = os.environ.get("CORS_ORIGINS", "*").strip()
+CORS_ORIGINS = (
+    ["*"] if _cors_raw == "*" else [o.strip() for o in _cors_raw.split(",") if o.strip()]
+)
 
 
 def _connect() -> sqlite3.Connection:
@@ -51,7 +64,7 @@ app = FastAPI(title="SentinelX I", version="0.6.5", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -352,6 +365,28 @@ def delete_investigation(investigation_id: int) -> Response:
     if not inv.delete_investigation(app.state.conn, investigation_id):
         raise HTTPException(404, f"investigation {investigation_id} not found")
     return Response(status_code=204)
+
+
+@app.get("/investigations/{investigation_id}/export")
+def export_investigation_pdf(investigation_id: int) -> Response:
+    from backend.api.export import render_investigation_pdf
+    try:
+        pdf_bytes, filename = render_investigation_pdf(app.state.conn, investigation_id)
+    except KeyError:
+        raise HTTPException(404, f"investigation {investigation_id} not found")
+    except OSError as e:
+        # WeasyPrint raises OSError when GTK runtime DLLs are missing on PATH.
+        raise HTTPException(
+            500,
+            f"PDF rendering failed (likely GTK runtime missing on PATH): {e}",
+        )
+    except Exception as e:
+        raise HTTPException(500, f"PDF rendering failed: {e}")
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/investigations/{investigation_id}/rerun")

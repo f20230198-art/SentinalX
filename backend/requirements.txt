@@ -1,1 +1,27 @@
+# SentinelX I — backend deps. Versions match what was validated against the
+# running pipeline; loosen at your own risk.
+#
+# Install (from repo root, with backend/.venv active):
+#   backend/.venv/Scripts/python.exe -m pip install -r backend/requirements.txt
+#
+# Stage 8: weasyprint also needs the GTK 3 runtime on Windows. Install from
+# https://github.com/tschoonj/GTK-for-Windows-Runtime-Environment-Installer and
+# add C:\Program Files\GTK3-Runtime Win64\bin to your user PATH.
+
+# Stage 2 — scraper
 httpx[socks]==0.27.2
+
+# Stage 3 — extraction (also: python -m spacy download en_core_web_sm)
+spacy==3.7.5
+
+# Stage 5 — MITRE embeddings
+sentence-transformers==5.4.1
+numpy==1.26.4
+
+# Stage 6 — API
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+
+# Stage 8 — PDF export
+weasyprint==62.3
+pydyf<0.11

@@ -2,11 +2,14 @@
  * Tiny typed wrapper around the SentinelX API.
  *
  * In dev, vite.config.ts proxies /api/* to http://127.0.0.1:8765 so we keep
- * everything same-origin (no CORS preflights). In prod, we'd serve the built
- * SPA from the same FastAPI process and drop the proxy.
+ * everything same-origin (no CORS preflights). In prod (Vercel), set
+ * VITE_API_BASE to the Render URL, e.g. https://sentinelx-api.onrender.com.
  */
 
-const BASE = "/api";
+export const API_BASE =
+  (import.meta.env.VITE_API_BASE as string | undefined)?.replace(/\/$/, "") ??
+  "/api";
+const BASE = API_BASE;
 
 async function get<T>(path: string, params?: Record<string, unknown>): Promise<T> {
   const qs = params
@@ -211,6 +214,8 @@ export const api = {
     lens?: string;
   }) => post<Investigation>("/investigations", body),
   rerun: (id: number) => post<Investigation>(`/investigations/${id}/rerun`, {}),
+  exportInvestigationUrl: (id: number) =>
+    `${BASE}/investigations/${id}/export`,
   deleteInvestigation: async (id: number): Promise<void> => {
     const r = await fetch(`${BASE}/investigations/${id}`, { method: "DELETE" });
     if (!r.ok && r.status !== 204)

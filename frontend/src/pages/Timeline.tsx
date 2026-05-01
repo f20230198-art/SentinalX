@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { type TimelinePost } from "../lib/api";
+import { API_BASE, type TimelinePost } from "../lib/api";
 import { SectionDivider } from "../components/Shell";
 import { DetailPanel, TECH_COLOR } from "../components/DetailPanel";
 import { useLivePosts } from "../hooks/useLivePosts";
@@ -124,7 +124,7 @@ export function Timeline() {
   const [historyDone, setHistoryDone] = useState(false);
 
   useEffect(() => {
-    const es = new EventSource("/api/events?since_id=0");
+    const es = new EventSource(`${API_BASE}/events?since_id=0`);
     let count = 0;
     let settleTimer: number | undefined;
     const scheduleSettle = () => {
