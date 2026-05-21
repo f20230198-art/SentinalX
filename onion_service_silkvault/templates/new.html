@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}SilkVault :: New Listing{% endblock %}
+{% block content %}
+<div class="page-head">
+    <h1>Post a Listing</h1>
+    <p class="page-sub">drop a new thread on the board &mdash; buyers are watching.</p>
+</div>
+
+{% if error %}
+<p class="empty-note" style="color:var(--danger);">{{ error }}</p>
+{% endif %}
+
+<form class="new-form" method="post" action="{{ url_for('new_listing') }}">
+    <label class="field">
+        <span class="field-label">title</span>
+        <input type="text" name="title" maxlength="160"
+               placeholder="[SELLING] ..." required>
+    </label>
+
+    <div class="field-row">
+        <label class="field">
+            <span class="field-label">board</span>
+            <select name="board" required>
+                {% for b in boards %}
+                <option value="{{ b }}">{{ b }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label class="field">
+            <span class="field-label">vendor handle</span>
+            <input type="text" name="vendor" maxlength="40"
+                   placeholder="your_handle" required>
+        </label>
+    </div>
+
+    <label class="field">
+        <span class="field-label">body</span>
+        <textarea name="body" rows="7"
+                  placeholder="describe the listing — include IPs, CVEs, wallets, etc."
+                  required></textarea>
+    </label>
+
+    <div class="form-actions">
+        <a class="btn-ghost" href="{{ url_for('index') }}">cancel</a>
+        <button type="submit" class="btn-amber">post listing</button>
+    </div>
+</form>
+{% endblock %}

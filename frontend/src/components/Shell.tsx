@@ -7,6 +7,7 @@ const NAV = [
   { to: "/posts", label: "[02] FEED" },
   { to: "/techniques", label: "[03] MITRE" },
   { to: "/investigations", label: "[04] INVESTIGATIONS" },
+  { to: "/scout", label: "[05] SCOUT" },
 ];
 
 export function Header() {

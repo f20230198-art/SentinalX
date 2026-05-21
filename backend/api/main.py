@@ -48,11 +48,25 @@ def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # WAL lets a reader (this API connection) and a writer (a background
+    # pipeline-job thread, on its own connection) work concurrently without
+    # "database is locked". busy_timeout makes any contended statement wait
+    # rather than fail immediately.
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Open a Store once at startup purely to apply schema.sql — its
+    # _init_schema() is idempotent (CREATE TABLE IF NOT EXISTS + guarded
+    # ALTERs), so this brings an older DB up to date (e.g. adds pipeline_jobs)
+    # before any request hits a new table. Then drop it; the API uses its own
+    # read connection.
+    from backend.db.store import Store
+
+    Store(DB_PATH).close()
     app.state.conn = _connect()
     try:
         yield
@@ -534,6 +548,74 @@ def healthz_full() -> dict[str, Any]:
         out["checks"]["pipeline"] = {"status": "down", "error": str(e)}
 
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Pipeline jobs — point SentinelX at an arbitrary .onion forum on demand.
+# --------------------------------------------------------------------------- #
+
+@app.post("/scrape-jobs", status_code=202)
+def create_scrape_job(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    """Start a full-pipeline run against a pasted .onion URL.
+
+    Body: {
+        "onion_url": "<host>.onion" or full URL,
+        "source": "<label>"?,        # defaults to the .onion host
+        "skip_llm": bool?            # fast mode — skip LLM enrichment
+    }
+
+    The job (scrape -> extract -> LLM -> MITRE -> mitigations) runs in a
+    background thread; the response is the freshly-created job row. Poll
+    GET /scrape-jobs/{id} for progress.
+    """
+    import threading
+    from urllib.parse import urlparse
+
+    from backend.jobs import runner
+
+    raw = str(payload.get("onion_url") or "").strip()
+    if not raw:
+        raise HTTPException(400, "onion_url is required")
+    # Normalise to a comparable host for validation + default source label.
+    host = urlparse(raw if "://" in raw else f"http://{raw}").netloc or raw
+    if not host.endswith(".onion"):
+        raise HTTPException(
+            400, f"onion_url must be a .onion address (got {host!r})"
+        )
+    source = str(payload.get("source") or "").strip() or host
+    skip_llm = bool(payload.get("skip_llm"))
+
+    c = app.state.conn
+    job_id = runner.create_job(c, onion_url=raw, source=source)
+
+    # Daemon thread: the job opens its OWN Store, so it never touches this
+    # request connection. The API only ever reads pipeline_jobs after this.
+    t = threading.Thread(
+        target=runner.run_job,
+        kwargs={"job_id": job_id, "onion_url": raw, "source": source,
+                "skip_llm": skip_llm},
+        daemon=True,
+        name=f"scrape-job-{job_id}",
+    )
+    t.start()
+
+    job = runner.get_job(c, job_id)
+    return job or {"id": job_id, "status": "queued"}
+
+
+@app.get("/scrape-jobs")
+def list_scrape_jobs(limit: int = Query(25, ge=1, le=100)) -> dict[str, Any]:
+    from backend.jobs import runner
+    return {"items": runner.list_jobs(app.state.conn, limit=limit)}
+
+
+@app.get("/scrape-jobs/{job_id}")
+def get_scrape_job(job_id: int) -> dict[str, Any]:
+    from backend.jobs import runner
+    job = runner.get_job(app.state.conn, job_id)
+    if job is None:
+        raise HTTPException(404, f"scrape job {job_id} not found")
+    return job
 
 
 # --------------------------------------------------------------------------- #

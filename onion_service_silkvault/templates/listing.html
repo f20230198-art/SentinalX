@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}SilkVault :: {{ listing['title'] }}{% endblock %}
+{% block content %}
+<div class="page-head">
+    <h1>{{ listing['title'] }}</h1>
+    <p class="page-sub">
+        board <a href="{{ url_for('board', slug=listing['board']) }}">{{ listing['board'] }}</a>
+        &middot; vendor <span class="vendor">{{ listing['vendor'] }}</span>
+        &middot; opened {{ listing['created_at'] | fmt_ts }}
+    </p>
+</div>
+
+<div class="message-thread">
+    {% for m in messages %}
+    <div class="vault-message" data-message-id="{{ m['id'] }}"
+         data-epoch="{{ m['created_at'] }}">
+        <div class="message-head">
+            <span class="message-author">{{ m['author'] }}</span>
+            <time class="message-ts" datetime="{{ m['created_at'] | iso_ts }}">
+                {{ m['created_at'] | fmt_ts }}
+            </time>
+            <span class="message-ref">msg-{{ m['id'] }}</span>
+        </div>
+        <div class="message-body">{{ m['body'] }}</div>
+    </div>
+    {% endfor %}
+</div>
+{% endblock %}

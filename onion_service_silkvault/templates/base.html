@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>{% block title %}SilkVault :: Encrypted Trade Hub{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='vault.css') }}">
+</head>
+<body>
+<div class="vault-shell">
+
+    <aside class="sidebar">
+        <div class="logo">
+            <a href="{{ url_for('index') }}">SilkVault</a>
+            <div class="logo-sub">encrypted trade hub</div>
+        </div>
+        <nav class="board-nav">
+            <div class="nav-heading">boards</div>
+            <a href="{{ url_for('board', slug='exploits') }}">exploits</a>
+            <a href="{{ url_for('board', slug='accounts') }}">accounts</a>
+            <a href="{{ url_for('board', slug='network-access') }}">network-access</a>
+            <a href="{{ url_for('board', slug='malware') }}">malware</a>
+            <a href="{{ url_for('board', slug='data-leaks') }}">data-leaks</a>
+            <a href="{{ url_for('board', slug='lounge') }}">lounge</a>
+        </nav>
+        <div class="sidebar-action">
+            <a class="post-link" href="{{ url_for('new_listing') }}">+ post listing</a>
+        </div>
+        <div class="sidebar-foot">
+            <small>tor only &middot; pgp on request &middot; escrow enforced</small>
+        </div>
+    </aside>
+
+    <main class="vault-main">
+        {% block content %}{% endblock %}
+    </main>
+
+</div>
+</body>
+</html>

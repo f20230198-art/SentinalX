@@ -170,18 +170,33 @@ def ingest_mitigations(store: Store) -> tuple[int, int]:
 
 # ---------- match cursor ---------------------------------------------------- #
 
-def _fetch_unmatched(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
+def _fetch_unmatched(
+    conn: sqlite3.Connection, limit: int, include_llmless: bool = False
+) -> list[sqlite3.Row]:
+    """Posts ready for MITRE matching but not yet matched.
+
+    Normally a post must have completed the LLM stage (so its LLM-claimed
+    T-codes can be verified). With `include_llmless=True`, posts that only
+    finished extraction (processed_at set, no LLM) are also returned — they
+    get pure semantic matching, no LLM verification. This is the path used
+    by a fast-mode pipeline job that skipped the LLM stage entirely.
+    """
+    gate = (
+        "rp.processed_at IS NOT NULL"
+        if include_llmless
+        else "EXISTS (SELECT 1 FROM post_processing_state pps_llm "
+             "WHERE pps_llm.raw_post_id = rp.id AND pps_llm.stage = 'llm')"
+    )
     return conn.execute(
         f"""
         SELECT rp.id, rp.body, la.techniques_json
         FROM raw_posts rp
-        JOIN post_processing_state pps_llm
-          ON pps_llm.raw_post_id = rp.id AND pps_llm.stage = 'llm'
         LEFT JOIN llm_analyses la ON la.raw_post_id = rp.id
-        WHERE NOT EXISTS (
+        WHERE {gate}
+          AND NOT EXISTS (
             SELECT 1 FROM post_processing_state pps
             WHERE pps.raw_post_id = rp.id AND pps.stage = ?
-        )
+          )
         ORDER BY rp.id
         LIMIT ?
         """,
@@ -230,6 +245,7 @@ def process_batch(
     batch_size: int,
     topk: int,
     threshold: float,
+    include_llmless: bool = False,
 ) -> tuple[int, int, int, int]:
     """Process up to batch_size posts. Returns (seen, verified, unverified, semantic)."""
     conn = store.conn
@@ -241,7 +257,7 @@ def process_batch(
     seen = v_total = u_total = s_total = 0
     err: str | None = None
     try:
-        rows = _fetch_unmatched(conn, batch_size)
+        rows = _fetch_unmatched(conn, batch_size, include_llmless=include_llmless)
         seen = len(rows)
         if rows:
             # Embed all post bodies in one batch -- sentence-transformers is
@@ -281,7 +297,8 @@ def process_batch(
 
 
 def run_once(store: Store, model_name: str, batch: int, topk: int,
-             threshold: float, limit: int | None) -> None:
+             threshold: float, limit: int | None,
+             include_llmless: bool = False) -> None:
     ids, matrix, id_set = match_mod.load_corpus(store.conn)
     if not ids:
         log.error("mitre_techniques is empty -- run with --ingest first")
@@ -296,6 +313,7 @@ def run_once(store: Store, model_name: str, batch: int, topk: int,
         size = min(batch, remaining) if limit is not None else batch
         seen, v, u, s = process_batch(
             store, ids, matrix, id_set, model_name, size, topk, threshold,
+            include_llmless=include_llmless,
         )
         total += seen
         if seen < size:

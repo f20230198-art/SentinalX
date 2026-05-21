@@ -1,20 +1,26 @@
-# SentinelX -- Stage 1 compose stack.
+# SentinelX -- compose stack.
 #
-# Two services:
-#   forum  -> Flask synthetic darknet forum (seeded on first boot)
-#   tor    -> Tor daemon: publishes the forum as a v3 .onion AND exposes a
-#             SOCKS5 proxy on the host at 127.0.0.1:9050 so later stages
-#             (the scraper) can hit the .onion through it.
+# Two synthetic darknet forums, each behind its own Tor hidden service:
 #
-# Volumes:
-#   forum_data        persists /data/forum.db across forum container restarts
-#   ./tor_config/hidden_service  bind mount that holds the hidden service
-#                                keypair + 'hostname' file. Keeping it on disk
-#                                means the .onion address stays the same every
-#                                time you `docker compose up`. Read it with:
-#                                cat tor_config/hidden_service/hostname
+#   forum  / tor        -> DarkBay   (onion_service/, tor_config/)
+#                          phpBB-style board WITH a JSON API.
+#   silkvault / tor-sv  -> SilkVault (onion_service_silkvault/,
+#                          tor_config_silkvault/) -- a structurally different
+#                          forum with NO JSON API, HTML pages only. It exists
+#                          to prove the SentinelX scraper is not hardcoded to
+#                          one site or one response format.
+#
+# SOCKS5 proxies on the host:
+#   127.0.0.1:9050  -> DarkBay's Tor
+#   127.0.0.1:9051  -> SilkVault's Tor
+#
+# Hidden-service keypairs are bind-mounted so each .onion address stays stable
+# across rebuilds. Read them with:
+#   cat tor_config/hidden_service/hostname
+#   cat tor_config_silkvault/hidden_service/hostname
 
 services:
+  # --- DarkBay: forum #1 (JSON API) ------------------------------------ #
   forum:
     build:
       context: ./onion_service
@@ -42,12 +48,46 @@ services:
       forum:
         condition: service_healthy
     ports:
-      # Expose SOCKS5 to host so future scraper (running on host or another
-      # container) can route through this Tor instance.
+      # Expose SOCKS5 to host so the scraper can route through this Tor instance.
       - "127.0.0.1:9050:9050"
     volumes:
       # Persist the .onion keypair so the address is stable across rebuilds.
       - ./tor_config/hidden_service:/var/lib/tor/sentinelx_forum
 
+  # --- SilkVault: forum #2 (HTML only, no API) ------------------------- #
+  silkvault:
+    build:
+      context: ./onion_service_silkvault
+      dockerfile: Dockerfile
+    container_name: sentinelx-silkvault
+    restart: unless-stopped
+    expose:
+      - "5000"        # only reachable inside the compose network (via tor-sv)
+    volumes:
+      - silkvault_data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/healthz', timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  tor-sv:
+    build:
+      context: ./tor_config_silkvault
+      dockerfile: Dockerfile
+    container_name: sentinelx-tor-silkvault
+    restart: unless-stopped
+    depends_on:
+      silkvault:
+        condition: service_healthy
+    ports:
+      # SilkVault's Tor SOCKS5 on host :9051 (DarkBay's is :9050).
+      - "127.0.0.1:9051:9050"
+    volumes:
+      # Persist SilkVault's .onion keypair so its address is stable.
+      - ./tor_config_silkvault/hidden_service:/var/lib/tor/silkvault_forum
+
 volumes:
   forum_data:
+  silkvault_data:

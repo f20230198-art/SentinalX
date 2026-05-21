@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}SilkVault :: Recent Listings{% endblock %}
+{% block content %}
+<div class="page-head">
+    <h1>Recent Listings</h1>
+    <p class="page-sub">freshest vendor activity across all boards &mdash; verify before you trade.</p>
+</div>
+
+<div class="board-chips">
+    {% for b in boards %}
+        <a class="board-chip" href="{{ url_for('board', slug=b['board']) }}">
+            {{ b['board'] }}<span class="chip-count">{{ b['n'] }}</span>
+        </a>
+    {% endfor %}
+</div>
+
+<div class="listing-feed">
+    {% for l in listings %}
+    <a class="listing-card" href="{{ url_for('listing', listing_id=l['id']) }}"
+       data-listing-id="{{ l['id'] }}">
+        <div class="listing-card-main">
+            <span class="listing-board board-{{ l['board'] }}">{{ l['board'] }}</span>
+            <span class="listing-title">{{ l['title'] }}</span>
+        </div>
+        <div class="listing-card-meta">
+            <span class="vendor">vendor: {{ l['vendor'] }}</span>
+            <span class="msg-count">{{ l['message_count'] }} msg</span>
+            <time datetime="{{ (l['last_message_at'] or l['created_at']) | iso_ts }}">
+                {{ (l['last_message_at'] or l['created_at']) | fmt_ts }}
+            </time>
+        </div>
+    </a>
+    {% endfor %}
+</div>
+{% endblock %}

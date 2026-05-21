@@ -26,19 +26,31 @@ class Store:
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
+        # busy_timeout: when a pipeline job (this Store) writes while the API
+        # reads on its own connection, wait for the lock instead of failing.
+        self.conn.execute("PRAGMA busy_timeout = 5000")
         self._init_schema()
 
     def _init_schema(self) -> None:
         with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
             self.conn.executescript(f.read())
-        # processed_at was added in Stage 3. Add it idempotently for DBs that
-        # were created before then. SQLite has no IF NOT EXISTS for ADD COLUMN.
+        # processed_at was added in Stage 3, source in Stage 2.5. Add them
+        # idempotently for DBs created before then — SQLite has no
+        # IF NOT EXISTS for ADD COLUMN, so we check PRAGMA table_info first.
         cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(raw_posts)")}
         if "processed_at" not in cols:
             self.conn.execute("ALTER TABLE raw_posts ADD COLUMN processed_at REAL")
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_raw_posts_processed ON raw_posts(processed_at)"
             )
+        if "source" not in cols:
+            # Pre-existing rows were all scraped from the original JSON forum.
+            self.conn.execute(
+                "ALTER TABLE raw_posts ADD COLUMN source TEXT NOT NULL DEFAULT 'darkbay'"
+            )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_raw_posts_source ON raw_posts(source)"
+        )
         self.conn.commit()
 
     def close(self) -> None:
@@ -46,15 +58,26 @@ class Store:
 
     # --- cursor ----------------------------------------------------------- #
 
-    def get_cursor(self) -> float:
+    def get_cursor(self, source: str | None = None) -> float:
         """Return MAX(source_created_at) over raw_posts, or 0.0 if empty.
 
         Using MAX over the data instead of a separate state row means the cursor
         cannot drift out of sync with what's actually stored.
+
+        With `source`, the cursor is scoped to one forum — so re-scraping
+        SilkVault doesn't get held back by DarkBay's (or another forum's)
+        newer posts. Without it, the cursor is global (original behaviour).
         """
-        row = self.conn.execute(
-            "SELECT COALESCE(MAX(source_created_at), 0.0) AS c FROM raw_posts"
-        ).fetchone()
+        if source is not None:
+            row = self.conn.execute(
+                "SELECT COALESCE(MAX(source_created_at), 0.0) AS c "
+                "FROM raw_posts WHERE source = ?",
+                (source,),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT COALESCE(MAX(source_created_at), 0.0) AS c FROM raw_posts"
+            ).fetchone()
         return float(row["c"])
 
     def reset(self) -> None:
@@ -67,8 +90,13 @@ class Store:
 
     # --- inserts ---------------------------------------------------------- #
 
-    def insert_posts(self, posts: Iterable[dict]) -> tuple[int, int]:
+    def insert_posts(self, posts: Iterable[dict], source: str = "darkbay") -> tuple[int, int]:
         """Insert posts, ignoring duplicates by source_post_id.
+
+        `source` records which forum the batch came from — 'darkbay' for the
+        original JSON-API forum, or an .onion host / label for posts pulled by
+        the generic HTML scraper. A per-post 'source' key overrides the
+        batch default if present.
 
         Returns (inserted, duplicates).
         """
@@ -82,8 +110,9 @@ class Store:
                     """
                     INSERT INTO raw_posts (
                         source_post_id, source_thread_id, thread_title,
-                        category, author, body, source_created_at, fetched_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        category, author, body, source_created_at, fetched_at,
+                        source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         int(p["id"]),
@@ -94,6 +123,7 @@ class Store:
                         p["body"],
                         float(p["created_at"]),
                         fetched_at,
+                        p.get("source", source),
                     ),
                 )
                 inserted += 1

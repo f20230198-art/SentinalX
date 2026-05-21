@@ -220,6 +220,26 @@ export interface IocList {
   items: IocAggItem[];
 }
 
+/** A pipeline job: one end-to-end run triggered by pasting an .onion URL.
+ *  scrape (HTML) -> extract -> LLM -> MITRE -> mitigations. */
+export interface ScrapeJob {
+  id: number;
+  onion_url: string;
+  source: string;
+  status: "queued" | "running" | "done" | "error";
+  stage: string;
+  posts_scraped: number;
+  posts_extracted: number;
+  posts_llm: number;
+  techniques_mapped: number;
+  llm_skipped: number;
+  message: string | null;
+  error: string | null;
+  created_at: number;
+  updated_at: number;
+  finished_at: number | null;
+}
+
 export const api = {
   healthz: () => get<{ status: string }>("/healthz"),
   healthzFull: () => get<HealthFull>("/healthz/full"),
@@ -240,6 +260,13 @@ export const api = {
     lens?: string;
   }) => post<Investigation>("/investigations", body),
   rerun: (id: number) => post<Investigation>(`/investigations/${id}/rerun`, {}),
+  scrapeJobs: () => get<{ items: ScrapeJob[] }>("/scrape-jobs"),
+  scrapeJob: (id: number) => get<ScrapeJob>(`/scrape-jobs/${id}`),
+  startScrapeJob: (body: {
+    onion_url: string;
+    source?: string;
+    skip_llm?: boolean;
+  }) => post<ScrapeJob>("/scrape-jobs", body),
   exportInvestigationUrl: (id: number) =>
     `${BASE}/investigations/${id}/export`,
   deleteInvestigation: async (id: number): Promise<void> => {

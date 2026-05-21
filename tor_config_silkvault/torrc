@@ -1,0 +1,32 @@
+# Tor daemon config for the SilkVault synthetic darknet forum (forum #2).
+#
+# This is a SECOND, independent Tor instance from tor_config/. It exists so
+# SilkVault gets its own distinct .onion address — proving the SentinelX
+# scraper can be pointed at more than one site.
+#
+# What this file does:
+#   1. Runs a SOCKS5 proxy on 0.0.0.0:9050 (mapped to host :9051 in compose,
+#      to avoid colliding with DarkBay's Tor on host :9050).
+#   2. Publishes a v3 hidden service forwarding port 80 on SilkVault's .onion
+#      to the SilkVault Flask container at silkvault:5000.
+#   3. Stores the keypair + hostname under /var/lib/tor/silkvault_forum/,
+#      bind-mounted to ./tor_config_silkvault/hidden_service on the host so the
+#      .onion address is stable across rebuilds.
+
+# --- SOCKS5 proxy ---
+SOCKSPort 0.0.0.0:9050
+SOCKSPolicy accept *
+
+# --- Logging (stdout so `docker logs` works) ---
+Log notice stdout
+
+# --- Data dir for relay keys, cached descriptors, etc. ---
+DataDirectory /var/lib/tor
+
+# --- Hidden service for SilkVault ---
+HiddenServiceDir /var/lib/tor/silkvault_forum/
+HiddenServiceVersion 3
+HiddenServicePort 80 silkvault:5000
+
+# We are not running as a relay; only as a client + onion service publisher.
+ClientOnly 1

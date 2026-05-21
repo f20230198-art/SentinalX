@@ -17,7 +17,11 @@ CREATE TABLE IF NOT EXISTS raw_posts (
     author              TEXT    NOT NULL,
     body                TEXT    NOT NULL,
     source_created_at   REAL    NOT NULL,
-    fetched_at          REAL    NOT NULL
+    fetched_at          REAL    NOT NULL,
+    -- Which forum this post came from. 'darkbay' for the original JSON-API
+    -- forum; an .onion host (or a label) for posts pulled by the generic HTML
+    -- scraper. Added in Stage 2.5; defaults to 'darkbay' for pre-existing rows.
+    source              TEXT    NOT NULL DEFAULT 'darkbay'
 );
 
 CREATE INDEX IF NOT EXISTS idx_raw_posts_source_created ON raw_posts(source_created_at);
@@ -258,3 +262,36 @@ CREATE TABLE IF NOT EXISTS investigations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_investigations_created ON investigations(created_at DESC);
+
+-- Stage 9: on-demand pipeline jobs.
+--
+-- A pipeline job is one end-to-end run triggered from the UI by pasting an
+-- .onion URL: scrape (HTML) -> extract -> LLM -> MITRE -> mitigations. The job
+-- runs in a background thread; this row is its live status, polled by the
+-- frontend. `stage` is the human-readable current step; `status` is the
+-- lifecycle state (queued | running | done | error). Counts accumulate as
+-- stages complete so the UI can show progress without parsing logs.
+--
+-- This is observability state, not pipeline data — the actual posts/iocs/etc.
+-- land in their normal tables, tagged with the job's `source`.
+
+CREATE TABLE IF NOT EXISTS pipeline_jobs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    onion_url       TEXT    NOT NULL,
+    source          TEXT    NOT NULL,
+    status          TEXT    NOT NULL DEFAULT 'queued',
+    stage           TEXT    NOT NULL DEFAULT 'queued',
+    posts_scraped   INTEGER NOT NULL DEFAULT 0,
+    posts_extracted INTEGER NOT NULL DEFAULT 0,
+    posts_llm       INTEGER NOT NULL DEFAULT 0,
+    techniques_mapped INTEGER NOT NULL DEFAULT 0,
+    llm_skipped     INTEGER NOT NULL DEFAULT 0,
+    message         TEXT,
+    error           TEXT,
+    created_at      REAL    NOT NULL,
+    updated_at      REAL    NOT NULL,
+    finished_at     REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_created ON pipeline_jobs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_status  ON pipeline_jobs(status);

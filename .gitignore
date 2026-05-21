@@ -28,6 +28,7 @@ build/
 
 # Tor keys & hidden service state (NEVER commit these)
 tor_config/hidden_service/
+tor_config_silkvault/hidden_service/
 *.key
 hostname
 

@@ -11,6 +11,9 @@
 # Stage 2 — scraper
 httpx[socks]==0.27.2
 
+# Stage 2.5 — generic HTML scraper (for forums with no JSON API, e.g. SilkVault)
+beautifulsoup4==4.12.3
+
 # Stage 3 — extraction (also: python -m spacy download en_core_web_sm)
 spacy==3.7.5
 

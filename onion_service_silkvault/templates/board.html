@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}SilkVault :: {{ board }}{% endblock %}
+{% block content %}
+<div class="page-head">
+    <h1>{{ board }}</h1>
+    <p class="page-sub">{{ listings|length }} listing(s) on this board.</p>
+</div>
+
+{% if listings %}
+<div class="listing-feed">
+    {% for l in listings %}
+    <a class="listing-card" href="{{ url_for('listing', listing_id=l['id']) }}"
+       data-listing-id="{{ l['id'] }}">
+        <div class="listing-card-main">
+            <span class="listing-board board-{{ l['board'] }}">{{ l['board'] }}</span>
+            <span class="listing-title">{{ l['title'] }}</span>
+        </div>
+        <div class="listing-card-meta">
+            <span class="vendor">vendor: {{ l['vendor'] }}</span>
+            <span class="msg-count">{{ l['message_count'] }} msg</span>
+            <time datetime="{{ l['created_at'] | iso_ts }}">
+                {{ l['created_at'] | fmt_ts }}
+            </time>
+        </div>
+    </a>
+    {% endfor %}
+</div>
+{% else %}
+<p class="empty-note">no listings on <code>{{ board }}</code> yet.</p>
+{% endif %}
+{% endblock %}
