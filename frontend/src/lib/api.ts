@@ -118,6 +118,31 @@ export interface Investigation {
   last_run_at: number | null;
   matched_total?: number;
   matched_posts?: PostListItem[];
+  mitigations?: InvestigationMitigation[];
+}
+
+/** A MITRE mitigation as resolved for a single post — defensive recommendation
+ *  driven purely by the post's technique mappings (no LLM). `addresses` lists
+ *  which of the post's T-codes this mitigation counters. */
+export interface PostMitigation {
+  mitigation_id: string;
+  name: string;
+  description: string;
+  url: string | null;
+  addresses: string[];
+  coverage: number;
+}
+
+/** A MITRE mitigation aggregated across an investigation's matched posts,
+ *  ranked by how many of those posts it would help defend. */
+export interface InvestigationMitigation {
+  mitigation_id: string;
+  name: string;
+  description: string;
+  url: string | null;
+  posts_covered: number;
+  post_share: number;
+  techniques: string[];
 }
 
 export interface PostDetail {
@@ -144,6 +169,7 @@ export interface PostDetail {
     name: string | null;
     tactics: string[] | null;
   }[];
+  mitigations: PostMitigation[];
 }
 
 export interface TechniqueListItem {

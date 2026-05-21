@@ -2,7 +2,12 @@ import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "framer-motion";
-import { api, type Investigation, type Lens } from "../lib/api";
+import {
+  api,
+  type Investigation,
+  type InvestigationMitigation,
+  type Lens,
+} from "../lib/api";
 import { SectionDivider } from "../components/Shell";
 import { DetailPanel } from "../components/DetailPanel";
 import { CitationText } from "../components/CitationText";
@@ -301,6 +306,23 @@ function InvestigationDetail({
           )}
         </section>
 
+        {data.mitigations && data.mitigations.length > 0 && (
+          <section>
+            <SectionLabel>
+              PRIORITY MITIGATIONS ({data.mitigations.length})
+            </SectionLabel>
+            <p className="font-mono text-[10px] text-text-muted mb-2 leading-relaxed">
+              MITRE ATT&amp;CK countermeasures ranked by how many matched posts
+              each one defends — act on the top of the list first.
+            </p>
+            <ul className="space-y-1.5">
+              {data.mitigations.slice(0, 12).map((m) => (
+                <MitigationRow key={m.mitigation_id} m={m} />
+              ))}
+            </ul>
+          </section>
+        )}
+
         {data.matched_posts && data.matched_posts.length > 0 && (
           <section>
             <SectionLabel>MATCHED POSTS ({data.matched_posts.length})</SectionLabel>
@@ -435,6 +457,33 @@ function CreateForm({
         </button>
       </div>
     </div>
+  );
+}
+
+function MitigationRow({ m }: { m: InvestigationMitigation }) {
+  const pct = Math.round(m.post_share * 100);
+  return (
+    <li className="border border-border-soft bg-surface-1/30 px-3 py-2">
+      <div className="flex items-baseline gap-2 font-mono text-xs">
+        <span className="text-emerald-400">{m.mitigation_id}</span>
+        <span className="text-text">{m.name}</span>
+        <span className="ml-auto text-[10px] text-text-muted whitespace-nowrap">
+          {m.posts_covered} posts · {pct}%
+        </span>
+      </div>
+      <div className="mt-1.5 h-1 bg-base/60 overflow-hidden">
+        <div
+          className="h-full bg-emerald-400/70"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <div
+        className="mt-1 font-mono text-[10px] text-text-muted truncate"
+        title={m.techniques.join(", ")}
+      >
+        counters: {m.techniques.join(" ")}
+      </div>
+    </li>
   );
 }
 

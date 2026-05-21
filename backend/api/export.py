@@ -132,6 +132,33 @@ def _build_mitre_chart_html(posts: list[dict[str, Any]]) -> str:
     return "".join(parts)
 
 
+def _build_mitigations_html(
+    conn: sqlite3.Connection, post_ids: list[int]
+) -> str:
+    """Render the 'Recommended Actions' table: MITRE mitigations for the cited
+    posts, ranked by how many posts each one would help defend."""
+    mitigations = inv.aggregate_mitigations(conn, post_ids)
+    if not mitigations:
+        return ('<p class="muted">No MITRE mitigations are published for the '
+                "techniques mapped to the cited posts.</p>")
+    top = max(m["posts_covered"] for m in mitigations) or 1
+    parts = ['<table class="mitre">']
+    parts.append(
+        "<thead><tr><th>Mitigation</th><th>Name</th>"
+        "<th class='count'>Posts</th><th class='bar'></th></tr></thead><tbody>"
+    )
+    for m in mitigations:
+        pct = int(round(100 * m["posts_covered"] / top))
+        parts.append(
+            f"<tr><td class='tid'>{_esc(m['mitigation_id'])}</td>"
+            f"<td>{_esc(m['name'])}</td>"
+            f"<td class='count'>{m['posts_covered']}</td>"
+            f"<td class='bar'><div class='bar-fill' style='width:{pct}%'></div></td></tr>"
+        )
+    parts.append("</tbody></table>")
+    return "".join(parts)
+
+
 def _build_post_appendix_html(n: int, p: dict[str, Any]) -> str:
     body_html = _esc(p.get("body") or "").replace("\n", "<br/>")
     iocs = p.get("iocs") or []
@@ -259,6 +286,7 @@ def render_investigation_pdf(
             full_posts.append(full)
 
     chart_html = _build_mitre_chart_html(full_posts)
+    mitigations_html = _build_mitigations_html(conn, [p["id"] for p in full_posts])
 
     filters_pretty = _esc(json.dumps(investigation["filters"], indent=2, sort_keys=True))
 
@@ -292,6 +320,10 @@ def render_investigation_pdf(
 
   <h2>MITRE ATT&amp;CK coverage</h2>
   {chart_html}
+
+  <h2>Recommended actions</h2>
+  <p class="muted">Official MITRE ATT&amp;CK mitigations for the techniques mapped to the cited posts, ranked by how many posts each one would help defend. Address the highest-coverage items first.</p>
+  {mitigations_html}
 </section>
 
 {appendices_html}

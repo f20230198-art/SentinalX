@@ -337,6 +337,65 @@ def list_investigations(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return [_row_to_inv(r) for r in rows]
 
 
+def aggregate_mitigations(
+    conn: sqlite3.Connection, post_ids: list[int]
+) -> list[dict[str, Any]]:
+    """Build a priority-ranked mitigation list across a set of posts.
+
+    For every MITRE mitigation reachable from any technique on any of these
+    posts, count how many distinct posts it would help defend. The result is a
+    'do this first' list — the mitigation covering the most posts ranks highest.
+
+    Pure lookup over post_techniques -> technique_mitigations; no LLM.
+    """
+    ids = [int(p) for p in post_ids]
+    if not ids:
+        return []
+    placeholders = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        f"""
+        SELECT m.mitigation_id, m.name, m.description, m.url,
+               pt.raw_post_id, tm.technique_id
+        FROM post_techniques pt
+        JOIN technique_mitigations tm ON tm.technique_id = pt.technique_id
+        JOIN mitre_mitigations m ON m.mitigation_id = tm.mitigation_id
+        WHERE pt.raw_post_id IN ({placeholders})
+        """,
+        ids,
+    ).fetchall()
+
+    by_mid: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        mid = r["mitigation_id"]
+        entry = by_mid.get(mid)
+        if entry is None:
+            entry = {
+                "mitigation_id": mid,
+                "name": r["name"],
+                "description": r["description"],
+                "url": r["url"],
+                "_posts": set(),
+                "_techniques": set(),
+            }
+            by_mid[mid] = entry
+        entry["_posts"].add(r["raw_post_id"])
+        entry["_techniques"].add(r["technique_id"])
+
+    total_posts = len(set(ids))
+    out: list[dict[str, Any]] = []
+    for e in by_mid.values():
+        posts_covered = len(e.pop("_posts"))
+        techniques = sorted(e.pop("_techniques"))
+        out.append({
+            **e,
+            "posts_covered": posts_covered,
+            "post_share": round(posts_covered / total_posts, 3) if total_posts else 0.0,
+            "techniques": techniques,
+        })
+    out.sort(key=lambda e: (-e["posts_covered"], e["mitigation_id"]))
+    return out
+
+
 def get_investigation(
     conn: sqlite3.Connection, investigation_id: int, *, include_posts: bool = True
 ) -> dict[str, Any]:
@@ -347,6 +406,10 @@ def get_investigation(
         raise KeyError(investigation_id)
     inv = _row_to_inv(row)
     if include_posts:
-        inv["matched_posts"] = evaluate_filter(conn, inv["filters"], limit=200)
+        posts = evaluate_filter(conn, inv["filters"], limit=200)
+        inv["matched_posts"] = posts
         inv["matched_total"] = count_filter(conn, inv["filters"])
+        inv["mitigations"] = aggregate_mitigations(
+            conn, [int(p["id"]) for p in posts]
+        )
     return inv

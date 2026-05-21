@@ -35,6 +35,20 @@ class Technique:
     parent_id: str | None
 
 
+@dataclass(frozen=True)
+class Mitigation:
+    mitigation_id: str
+    name: str
+    description: str
+    url: str | None
+
+
+@dataclass(frozen=True)
+class MitigationLink:
+    technique_id: str
+    mitigation_id: str
+
+
 def download(cache_path: Path = DEFAULT_CACHE, force: bool = False) -> Path:
     """Download the corpus JSON to cache_path. Skips if file already exists."""
     cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -117,3 +131,77 @@ def parse(cache_path: Path = DEFAULT_CACHE) -> list[Technique]:
 def fetch_and_parse(cache_path: Path = DEFAULT_CACHE, force_download: bool = False) -> list[Technique]:
     download(cache_path, force=force_download)
     return parse(cache_path)
+
+
+def parse_mitigations(
+    cache_path: Path = DEFAULT_CACHE,
+) -> tuple[list[Mitigation], list[MitigationLink]]:
+    """Parse the official ATT&CK mitigations and their technique links.
+
+    MITRE records countermeasures as 'course-of-action' STIX objects (Mxxxx
+    codes) and connects them to techniques with 'relationship' objects whose
+    relationship_type is 'mitigates' (source = course-of-action, target =
+    attack-pattern). We resolve both STIX-id ends back to their Mxxxx / Txxxx
+    external ids so the join table is keyed by the same codes the rest of the
+    app uses.
+
+    Filters mirror parse(): drop revoked/deprecated objects, require an
+    mitre-attack external_id. Links whose technique end is missing from the
+    parsed technique set are dropped so the FK into mitre_techniques holds.
+    """
+    raw = json.loads(cache_path.read_text(encoding="utf-8"))
+    objects = raw.get("objects", [])
+
+    # STIX-id -> external code, for both ends of the 'mitigates' relationship.
+    coa_stix_to_mid: dict[str, str] = {}
+    mitigations: list[Mitigation] = []
+    for o in objects:
+        if o.get("type") != "course-of-action":
+            continue
+        if o.get("revoked") or o.get("x_mitre_deprecated"):
+            continue
+        mid, url = _external_id_and_url(o)
+        if not mid:
+            continue
+        coa_stix_to_mid[o["id"]] = mid
+        mitigations.append(
+            Mitigation(
+                mitigation_id=mid,
+                name=o.get("name", ""),
+                description=o.get("description", ""),
+                url=url,
+            )
+        )
+
+    tech_stix_to_tcode: dict[str, str] = {}
+    valid_tcodes: set[str] = set()
+    for o in objects:
+        if o.get("type") != "attack-pattern":
+            continue
+        if o.get("revoked") or o.get("x_mitre_deprecated"):
+            continue
+        tcode, _ = _external_id_and_url(o)
+        if tcode:
+            tech_stix_to_tcode[o["id"]] = tcode
+            valid_tcodes.add(tcode)
+
+    links: list[MitigationLink] = []
+    seen: set[tuple[str, str]] = set()
+    for o in objects:
+        if o.get("type") != "relationship":
+            continue
+        if o.get("relationship_type") != "mitigates":
+            continue
+        if o.get("revoked") or o.get("x_mitre_deprecated"):
+            continue
+        mid = coa_stix_to_mid.get(o.get("source_ref", ""))
+        tcode = tech_stix_to_tcode.get(o.get("target_ref", ""))
+        if not mid or not tcode or tcode not in valid_tcodes:
+            continue
+        key = (tcode, mid)
+        if key in seen:
+            continue
+        seen.add(key)
+        links.append(MitigationLink(technique_id=tcode, mitigation_id=mid))
+
+    return mitigations, links

@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "framer-motion";
 import { Link } from "react-router-dom";
-import { api, type PostDetail } from "../lib/api";
+import { api, type PostDetail, type PostMitigation } from "../lib/api";
 
 export const TECH_COLOR: Record<string, string> = {
   llm_verified: "rgb(167, 139, 250)",
@@ -109,6 +109,22 @@ function DetailBody({ d }: { d: PostDetail }) {
         </section>
       )}
 
+      {d.mitigations.length > 0 && (
+        <section>
+          <SectionLabel>
+            DEFENSIVE RECOMMENDATIONS ({d.mitigations.length})
+          </SectionLabel>
+          <p className="font-mono text-[10px] text-text-muted mb-2 leading-relaxed">
+            MITRE ATT&amp;CK mitigations for this post's techniques.
+          </p>
+          <ul className="space-y-2">
+            {d.mitigations.map((m) => (
+              <MitigationItem key={m.mitigation_id} m={m} />
+            ))}
+          </ul>
+        </section>
+      )}
+
       {d.iocs.length > 0 && (
         <section>
           <SectionLabel>IOCS ({d.iocs.length})</SectionLabel>
@@ -143,6 +159,36 @@ function DetailBody({ d }: { d: PostDetail }) {
         </section>
       )}
     </div>
+  );
+}
+
+function MitigationItem({ m }: { m: PostMitigation }) {
+  return (
+    <li className="border border-border-soft bg-surface-1/30 px-3 py-2">
+      <div className="flex items-baseline gap-2 font-mono text-xs">
+        <span className="text-emerald-400">{m.mitigation_id}</span>
+        <span className="text-text">{m.name}</span>
+        <span
+          className="ml-auto text-[10px] text-text-muted"
+          title={`counters ${m.addresses.join(", ")}`}
+        >
+          {m.addresses.join(" ")}
+        </span>
+      </div>
+      <p className="text-[11px] leading-relaxed text-text-muted mt-1 line-clamp-3">
+        {m.description}
+      </p>
+      {m.url && (
+        <a
+          href={m.url}
+          target="_blank"
+          rel="noreferrer"
+          className="font-mono text-[10px] text-accent hover:underline mt-1 inline-block"
+        >
+          attack.mitre.org ↗
+        </a>
+      )}
+    </li>
   );
 }
 

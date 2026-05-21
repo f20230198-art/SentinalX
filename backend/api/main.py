@@ -83,6 +83,54 @@ def _maybe_json(s: str | None) -> Any:
         return s
 
 
+def _mitigations_for_techniques(
+    c: sqlite3.Connection, technique_ids: list[str]
+) -> list[dict[str, Any]]:
+    """Resolve a set of T-codes to their MITRE mitigations (defensive
+    recommendations), deduped. Each mitigation carries `addresses` — the list
+    of input T-codes it counters — so the UI can show why it's recommended,
+    and `coverage` (how many of those it counters) for ranking.
+
+    Pure lookup over technique_mitigations; no LLM. Returns [] when none of
+    the techniques have published mitigations (correct for some discovery
+    techniques MITRE lists no countermeasure for).
+    """
+    tids = [t for t in dict.fromkeys(technique_ids) if t]
+    if not tids:
+        return []
+    placeholders = ",".join("?" for _ in tids)
+    rows = c.execute(
+        f"""
+        SELECT m.mitigation_id, m.name, m.description, m.url, tm.technique_id
+        FROM technique_mitigations tm
+        JOIN mitre_mitigations m ON m.mitigation_id = tm.mitigation_id
+        WHERE tm.technique_id IN ({placeholders})
+        """,
+        tids,
+    ).fetchall()
+    by_mid: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        mid = r["mitigation_id"]
+        entry = by_mid.get(mid)
+        if entry is None:
+            entry = {
+                "mitigation_id": mid,
+                "name": r["name"],
+                "description": r["description"],
+                "url": r["url"],
+                "addresses": [],
+            }
+            by_mid[mid] = entry
+        entry["addresses"].append(r["technique_id"])
+    out = list(by_mid.values())
+    for e in out:
+        e["addresses"] = sorted(set(e["addresses"]))
+        e["coverage"] = len(e["addresses"])
+    # Most broadly-applicable mitigation first, then stable by code.
+    out.sort(key=lambda e: (-e["coverage"], e["mitigation_id"]))
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Health + meta
 # --------------------------------------------------------------------------- #
@@ -207,8 +255,13 @@ def get_post(post_id: int) -> dict[str, Any]:
         if t.get("tactics"):
             t["tactics"] = [x for x in t["tactics"].split(",") if x]
 
+    mitigations = _mitigations_for_techniques(
+        c, [t["technique_id"] for t in techniques]
+    )
+
     return {"post": post, "analysis": analysis, "iocs": iocs,
-            "entities": entities, "techniques": techniques}
+            "entities": entities, "techniques": techniques,
+            "mitigations": mitigations}
 
 
 # --------------------------------------------------------------------------- #

@@ -110,6 +110,64 @@ def ingest(store: Store, model_name: str, force_download: bool = False) -> int:
     return upserted
 
 
+# ---------- mitigations ingest ---------------------------------------------- #
+
+def ingest_mitigations(store: Store) -> tuple[int, int]:
+    """Parse the cached MITRE corpus for course-of-action objects + their
+    'mitigates' links, and upsert into mitre_mitigations / technique_mitigations.
+
+    Embedding-free and offline — it only reads the already-cached STIX file, so
+    it runs in ~1s and is safe to re-run any time. Returns (mitigations, links).
+    """
+    log.info("ingest-mitigations: parsing course-of-action objects from cached corpus")
+    mitigations, links = ingest_mod.parse_mitigations()
+    log.info("ingest-mitigations: parsed %d mitigations, %d technique links",
+             len(mitigations), len(links))
+
+    now = time.time()
+    conn = store.conn
+
+    for m in mitigations:
+        conn.execute(
+            """
+            INSERT INTO mitre_mitigations (mitigation_id, name, description, url, ingested_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(mitigation_id) DO UPDATE SET
+                name = excluded.name,
+                description = excluded.description,
+                url = excluded.url,
+                ingested_at = excluded.ingested_at
+            """,
+            (m.mitigation_id, m.name, m.description, m.url, now),
+        )
+
+    # Known technique ids — drop any link whose technique isn't in the corpus
+    # so the FK into mitre_techniques always holds (defensive; parse already filters).
+    known = {r[0] for r in conn.execute("SELECT technique_id FROM mitre_techniques")}
+    linked = 0
+    skipped = 0
+    for ln in links:
+        if known and ln.technique_id not in known:
+            skipped += 1
+            continue
+        conn.execute(
+            """
+            INSERT INTO technique_mitigations (technique_id, mitigation_id, ingested_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(technique_id, mitigation_id) DO UPDATE SET
+                ingested_at = excluded.ingested_at
+            """,
+            (ln.technique_id, ln.mitigation_id, now),
+        )
+        linked += 1
+    conn.commit()
+    if skipped:
+        log.warning("ingest-mitigations: skipped %d links to techniques not in corpus "
+                    "(run --ingest first for full coverage)", skipped)
+    log.info("ingest-mitigations: upserted %d mitigations, %d links", len(mitigations), linked)
+    return len(mitigations), linked
+
+
 # ---------- match cursor ---------------------------------------------------- #
 
 def _fetch_unmatched(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
@@ -265,7 +323,10 @@ def reset_matches(store: Store) -> None:
 
 
 def reset_corpus(store: Store) -> None:
-    store.conn.executescript("DELETE FROM mitre_techniques;")
+    store.conn.executescript(
+        "DELETE FROM technique_mitigations; DELETE FROM mitre_mitigations;"
+        "DELETE FROM mitre_techniques;"
+    )
     store.conn.commit()
 
 
@@ -274,6 +335,9 @@ def main(argv: list[str] | None = None) -> int:
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--ingest", action="store_true",
                       help="download + parse + embed the MITRE corpus")
+    mode.add_argument("--ingest-mitigations", action="store_true", dest="ingest_mitigations",
+                      help="parse + upsert MITRE mitigations from the cached corpus "
+                           "(offline, no embedding; run --ingest at least once first)")
     mode.add_argument("--once", action="store_true",
                       help="match all unmatched posts and exit (default)")
     mode.add_argument("--watch", action="store_true")
@@ -312,6 +376,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.ingest:
             ingest(store, model_name=args.model, force_download=args.force_download)
+            ingest_mitigations(store)
+            return 0
+        if args.ingest_mitigations:
+            ingest_mitigations(store)
             return 0
         if args.watch:
             run_watch(store, args.model, args.batch, args.topk, args.threshold, args.interval)

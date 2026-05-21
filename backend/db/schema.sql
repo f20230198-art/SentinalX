@@ -193,6 +193,39 @@ CREATE TABLE IF NOT EXISTS mitre_runs (
     error               TEXT
 );
 
+-- Stage 5.5: MITRE ATT&CK mitigations (defensive recommendations).
+--
+-- The same Enterprise ATT&CK STIX file we already parse for techniques also
+-- contains 'course-of-action' objects (the official mitigations, Mxxxx codes)
+-- and 'relationship' objects of type 'mitigates' linking a course-of-action to
+-- an attack-pattern. We parse those here so every technique on a post can carry
+-- MITRE's own recommended countermeasures — no LLM, no guessing, pure lookup.
+--
+-- mitre_mitigations:     one row per Enterprise mitigation (Mxxxx).
+-- technique_mitigations: join table, one row per (technique, mitigation) edge.
+--                        Idempotent re-ingest via UNIQUE(technique_id, mitigation_id).
+
+CREATE TABLE IF NOT EXISTS mitre_mitigations (
+    mitigation_id   TEXT    PRIMARY KEY,
+    name            TEXT    NOT NULL,
+    description     TEXT    NOT NULL,
+    url             TEXT,
+    ingested_at     REAL    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS technique_mitigations (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    technique_id    TEXT    NOT NULL,
+    mitigation_id   TEXT    NOT NULL,
+    ingested_at     REAL    NOT NULL,
+    UNIQUE(technique_id, mitigation_id),
+    FOREIGN KEY(technique_id)  REFERENCES mitre_techniques(technique_id)   ON DELETE CASCADE,
+    FOREIGN KEY(mitigation_id) REFERENCES mitre_mitigations(mitigation_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_tm_technique  ON technique_mitigations(technique_id);
+CREATE INDEX IF NOT EXISTS idx_tm_mitigation ON technique_mitigations(mitigation_id);
+
 -- Stage 6.5: investigations layer.
 --
 -- An investigation is a named, replayable view: a saved filter over the corpus

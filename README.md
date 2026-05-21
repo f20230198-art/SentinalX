@@ -196,6 +196,7 @@ industry parallels) at [`docs/learn/`](docs/learn/).
 | 3 | spaCy NER + regex IOC extraction | [`STAGE_03_LEARN.md`](docs/learn/STAGE_03_LEARN.md) |
 | 4 | 4-prompt Mistral 7B enrichment chain | [`STAGE_04_LEARN.md`](docs/learn/STAGE_04_LEARN.md) |
 | 5 | MITRE ATT&CK ingest + semantic mapping | [`STAGE_05_LEARN.md`](docs/learn/STAGE_05_LEARN.md) |
+| 5.5 | MITRE mitigations (defensive recommendations) | [`STAGE_05_5_LEARN.md`](docs/learn/STAGE_05_5_LEARN.md) |
 | 6 | FastAPI backend (REST + SSE) | [`STAGE_06_LEARN.md`](docs/learn/STAGE_06_LEARN.md) |
 | 6.5 | Investigations + lenses + diagnostics | [`STAGE_06_5_LEARN.md`](docs/learn/STAGE_06_5_LEARN.md) |
 | 7 | React/Vite/Tailwind dashboard | [`STAGE_07_LEARN.md`](docs/learn/STAGE_07_LEARN.md) |
