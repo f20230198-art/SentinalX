@@ -28,7 +28,7 @@ def read_onion_hostname(path: Path = DEFAULT_HOSTNAME_FILE) -> str:
     if not path.exists():
         raise FileNotFoundError(
             f"Tor hidden-service hostname file not found at {path}. "
-            "Is the Stage-1 stack running? `docker compose up --build`."
+            "Is the Tor + .onion forum stack running? `docker compose up --build`."
         )
     addr = path.read_text(encoding="utf-8").strip()
     if not addr.endswith(".onion"):

@@ -17,6 +17,14 @@ beautifulsoup4==4.12.3
 # Stage 3 — extraction (also: python -m spacy download en_core_web_sm)
 spacy==3.7.5
 
+# Stage 7 — multilingual ingestion.
+#   langdetect: pure-Python language detection, no model download.
+#   argostranslate: offline neural MT. Language packages (~100MB each) are
+#     fetched on first use and cached; the pipeline auto-installs ru/zh/es/…
+#     as posts in those languages appear. Fully offline at translate-time.
+langdetect==1.0.9
+argostranslate==1.9.6
+
 # Stage 5 — MITRE embeddings
 sentence-transformers==5.4.1
 numpy==1.26.4

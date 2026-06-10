@@ -1,10 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 import { api } from "../lib/api";
 import { useScramble } from "../hooks/useScramble";
 import { SectionDivider } from "../components/Shell";
 
 export function Home() {
+  const { t } = useTranslation();
   const stats = useQuery({ queryKey: ["stats"], queryFn: api.stats });
   const health = useQuery({
     queryKey: ["healthz", "full"],
@@ -23,21 +25,31 @@ export function Home() {
 
       <SectionDivider
         index="02"
-        label="System status"
+        label={t("home.sectionStatus")}
         trailing={
-          health.data ? `health: ${health.data.status.toUpperCase()}` : "checking…"
+          health.data
+            ? t("home.health", { status: health.data.status.toUpperCase() })
+            : t("common.checking")
         }
       />
       <HealthGrid data={health.data} loading={health.isLoading} />
 
       <SectionDivider
         index="03"
-        label="Intelligence feed"
-        trailing={stats.data ? `${stats.data.posts_total} posts indexed` : ""}
+        label={t("home.sectionFeed")}
+        trailing={
+          stats.data
+            ? t("home.postsIndexed", { count: stats.data.posts_total })
+            : ""
+        }
       />
       <FeedTeaser />
 
-      <SectionDivider index="04" label="Mitre activity" trailing="top techniques" />
+      <SectionDivider
+        index="04"
+        label={t("home.sectionMitre")}
+        trailing={t("home.topTechniques")}
+      />
       <TopTechniques data={stats.data?.top_techniques ?? []} />
 
       <div className="h-32" />
@@ -56,28 +68,32 @@ function Hero({
   iocs: number;
   loading: boolean;
 }) {
-  const title = useScramble("OBSERVING THE DARK", []);
+  const { t } = useTranslation();
+  // useScramble keys on its target — switching language changes the string and
+  // re-runs the decryption animation for the localized title.
+  const title = useScramble(t("home.heroTitle"));
   return (
     <section className="hero-gradient relative pt-24 pb-20 px-2 -mx-8 mb-4">
       <div className="max-w-[1440px] mx-auto px-8 grid grid-cols-12 gap-6">
         <div className="col-span-12 md:col-span-8">
           <div className="font-mono text-xs tracking-[0.3em] text-accent mb-6">
-            [01] // CONSOLE
+            [01] // {t("nav.console")}
           </div>
           <h1 className="font-display text-5xl md:text-7xl font-semibold leading-[1.05] tracking-tight">
             <span className="scramble">{title}</span>
           </h1>
           <p className="mt-6 max-w-2xl text-text-muted leading-relaxed">
-            A continuous threat-intelligence pipeline. Scrapes a synthetic .onion
-            forum over Tor, extracts IOCs and entities, runs a local LLM chain
-            against every post, and maps behaviours to MITRE ATT&amp;CK. Built
-            end-to-end as a learning project, every layer real.
+            {t("home.heroBody")}
           </p>
         </div>
         <div className="col-span-12 md:col-span-4 flex flex-col gap-4 justify-end">
-          <Stat label="POSTS INDEXED" value={posts} loading={loading} />
-          <Stat label="TECHNIQUE LINKS" value={techniques} loading={loading} />
-          <Stat label="IOCS EXTRACTED" value={iocs} loading={loading} />
+          <Stat label={t("home.statPosts")} value={posts} loading={loading} />
+          <Stat
+            label={t("home.statTechniques")}
+            value={techniques}
+            loading={loading}
+          />
+          <Stat label={t("home.statIocs")} value={iocs} loading={loading} />
         </div>
       </div>
     </section>
@@ -118,6 +134,7 @@ function HealthGrid({
   data: import("../lib/api").HealthFull | undefined;
   loading: boolean;
 }) {
+  const { t } = useTranslation();
   const ORDER: { key: string; tint: string }[] = [
     { key: "db", tint: "rgb(167,139,250)" },
     { key: "ollama", tint: "rgb(110,231,183)" },
@@ -164,7 +181,7 @@ function HealthGrid({
               className="font-mono text-sm"
               style={{ color: up ? tint : undefined }}
             >
-              {loading ? "…" : up ? "ONLINE" : "DOWN"}
+              {loading ? "…" : up ? t("common.online") : t("common.down")}
             </div>
             {c?.latency_ms !== undefined && (
               <div className="font-mono text-[10px] text-text-muted mt-1">
@@ -184,12 +201,17 @@ function HealthGrid({
 }
 
 function FeedTeaser() {
+  const { t } = useTranslation();
   const posts = useQuery({
     queryKey: ["posts", { limit: 6 }],
     queryFn: () => api.posts({ limit: 6 }),
   });
   if (posts.isLoading)
-    return <div className="font-mono text-xs text-text-muted">loading feed…</div>;
+    return (
+      <div className="font-mono text-xs text-text-muted">
+        {t("home.loadingFeed")}
+      </div>
+    );
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
       {posts.data?.items.map((p) => {
@@ -233,8 +255,13 @@ function TopTechniques({
 }: {
   data: { technique_id: string; name: string | null; n: number }[];
 }) {
+  const { t } = useTranslation();
   if (!data.length)
-    return <div className="font-mono text-xs text-text-muted">no data</div>;
+    return (
+      <div className="font-mono text-xs text-text-muted">
+        {t("common.noData")}
+      </div>
+    );
   const max = Math.max(...data.map((d) => d.n));
   return (
     <div className="space-y-2">

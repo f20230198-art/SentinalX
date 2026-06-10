@@ -181,6 +181,16 @@ def stats() -> dict[str, Any]:
         "by_technique_source": rows(
             "SELECT source, COUNT(*) AS n FROM post_techniques GROUP BY source"
         ),
+        # Language mix of the ingested corpus. Posts not yet through
+        # extraction have lang NULL — bucket those as 'unknown' so the counts
+        # still sum to posts_total.
+        "by_language": rows(
+            "SELECT COALESCE(lang, 'unknown') AS lang, COUNT(*) AS n "
+            "FROM raw_posts GROUP BY COALESCE(lang, 'unknown') ORDER BY n DESC"
+        ),
+        "posts_translated": one(
+            "SELECT COUNT(*) FROM raw_posts WHERE body_en IS NOT NULL"
+        ),
         "top_techniques": rows(
             "SELECT pt.technique_id, mt.name, COUNT(*) AS n FROM post_techniques pt "
             "LEFT JOIN mitre_techniques mt ON mt.technique_id = pt.technique_id "
@@ -214,8 +224,12 @@ def list_posts(
         join_pt = "JOIN post_techniques pt ON pt.raw_post_id = rp.id AND pt.technique_id = ?"
         args.insert(0, technique)
     if q:
-        where.append("(rp.body LIKE ? OR rp.thread_title LIKE ?)")
-        like = f"%{q}%"; args.extend([like, like])
+        # Search the original body, the English translation, and the title — so
+        # an English query term still finds a translated non-English post.
+        where.append(
+            "(rp.body LIKE ? OR rp.body_en LIKE ? OR rp.thread_title LIKE ?)"
+        )
+        like = f"%{q}%"; args.extend([like, like, like])
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
     count_sql = (
@@ -224,9 +238,12 @@ def list_posts(
     )
     total = c.execute(count_sql, args).fetchone()["n"]
 
+    # body_preview shows the English translation when present (body_en) so the
+    # list is readable; lang / lang_confidence let the UI badge translated rows.
     list_sql = (
         f"SELECT DISTINCT rp.id, rp.thread_title, rp.category, rp.author, "
-        f"  substr(rp.body, 1, 280) AS body_preview, rp.source_created_at, "
+        f"  substr(COALESCE(rp.body_en, rp.body), 1, 280) AS body_preview, "
+        f"  rp.source_created_at, rp.lang, rp.lang_confidence, "
         f"  la.intent, la.summary "
         f"FROM raw_posts rp LEFT JOIN llm_analyses la ON la.raw_post_id = rp.id {join_pt} "
         f"{where_sql} ORDER BY rp.source_created_at DESC LIMIT ? OFFSET ?"
@@ -369,7 +386,7 @@ def list_iocs(
 
 
 # --------------------------------------------------------------------------- #
-# Investigations + lenses (Stage 6.5)
+# Investigations + lenses
 # --------------------------------------------------------------------------- #
 
 @app.get("/lenses")
@@ -627,7 +644,8 @@ def get_scrape_job(job_id: int) -> dict[str, Any]:
 def _post_event(c: sqlite3.Connection, post_id: int) -> dict[str, Any]:
     row = c.execute(
         "SELECT rp.id, rp.thread_title, rp.category, rp.author, "
-        "  substr(rp.body, 1, 240) AS body_preview, rp.source_created_at, "
+        "  substr(COALESCE(rp.body_en, rp.body), 1, 240) AS body_preview, "
+        "  rp.source_created_at, rp.lang, rp.lang_confidence, "
         "  la.intent, la.summary "
         "FROM raw_posts rp LEFT JOIN llm_analyses la ON la.raw_post_id = rp.id "
         "WHERE rp.id = ?",

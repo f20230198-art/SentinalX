@@ -52,6 +52,9 @@ export interface Stats {
   by_ioc_type: { ioc_type: string; n: number }[];
   by_technique_source: { source: string; n: number }[];
   top_techniques: { technique_id: string; name: string | null; n: number }[];
+  /** Language mix of the ingested corpus. */
+  by_language: { lang: string; n: number }[];
+  posts_translated: number;
 }
 
 export interface PostListItem {
@@ -63,6 +66,10 @@ export interface PostListItem {
   source_created_at: number;
   intent: string | null;
   summary: string | null;
+  /** Detected ISO language of the post ('en','ru',…) or 'unknown'.
+   *  null for posts ingested before multilingual support landed. */
+  lang: string | null;
+  lang_confidence: number | null;
 }
 
 export interface PostList {
@@ -94,6 +101,10 @@ export interface TimelinePost {
   source_created_at: number;
   intent: string | null;
   summary: string | null;
+  /** Detected language of the post, or null for posts ingested before
+   *  multilingual support landed. */
+  lang: string | null;
+  lang_confidence: number | null;
   techniques: { technique_id: string; source: string; name: string | null }[];
   iocs: { ioc_type: string; value: string }[];
 }
@@ -153,6 +164,12 @@ export interface PostDetail {
     author: string;
     body: string;
     source_created_at: number;
+    /** Language metadata. lang is the detected ISO code; body_en is the
+     *  English translation when the post is non-English (null otherwise, and
+     *  null for posts ingested before multilingual support landed). */
+    lang: string | null;
+    lang_confidence: number | null;
+    body_en: string | null;
   };
   analysis: {
     intent: string | null;

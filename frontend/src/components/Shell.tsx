@@ -1,17 +1,22 @@
 import { Link, NavLink } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import { useCrtMode } from "../hooks/useCrtMode";
 import { WatchIndicator } from "./WatchIndicator";
+import { LanguageSwitcher } from "./LanguageSwitcher";
 
+// The bracketed index ("[01]") is decorative chrome and stays fixed; only the
+// label word is translated, via the i18n `key`.
 const NAV = [
-  { to: "/", label: "[01] CONSOLE" },
-  { to: "/posts", label: "[02] FEED" },
-  { to: "/techniques", label: "[03] MITRE" },
-  { to: "/investigations", label: "[04] INVESTIGATIONS" },
-  { to: "/scout", label: "[05] SCOUT" },
+  { to: "/", index: "01", key: "nav.console" },
+  { to: "/posts", index: "02", key: "nav.feed" },
+  { to: "/techniques", index: "03", key: "nav.mitre" },
+  { to: "/investigations", index: "04", key: "nav.investigations" },
+  { to: "/scout", index: "05", key: "nav.scout" },
 ];
 
 export function Header() {
   const [crt, toggleCrt] = useCrtMode();
+  const { t } = useTranslation();
   return (
     <header className="relative z-10 border-b border-border-soft bg-base/80 backdrop-blur-sm">
       <div className="max-w-[1440px] mx-auto px-8 py-4 flex items-center gap-8">
@@ -32,11 +37,12 @@ export function Header() {
                 }`
               }
             >
-              {n.label}
+              [{n.index}] {t(n.key)}
             </NavLink>
           ))}
         </nav>
         <div className="ml-auto flex items-center gap-3">
+          <LanguageSwitcher />
           <WatchIndicator />
           <button
             onClick={toggleCrt}

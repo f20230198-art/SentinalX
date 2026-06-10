@@ -10,7 +10,7 @@ Ollama exposes a local REST API on http://127.0.0.1:11434. We hit two endpoints:
 
 We deliberately do NOT use the `ollama` Python package. It adds a dependency
 to do the same two POSTs we'd write by hand, and locks us to a particular
-release cadence. httpx is already in the project (Stage 2).
+release cadence. httpx is already in the project (used by the scraper).
 """
 
 from __future__ import annotations

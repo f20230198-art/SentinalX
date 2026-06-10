@@ -1,10 +1,10 @@
 """LLM analysis pipeline entrypoint.
 
-Reads posts that have been Stage-3-processed but not yet Stage-4-analysed,
-runs the 4-prompt chain over each, and persists the result.
+Reads posts that have been extracted but not yet LLM-analysed, runs the
+4-prompt chain over each, and persists the result.
 
 Cursor:
-    Posts where raw_posts.processed_at IS NOT NULL  (Stage 3 done)
+    Posts where raw_posts.processed_at IS NOT NULL  (extraction done)
     AND raw_post_id is not in post_processing_state for stage 'llm'.
 
 Usage:
@@ -42,9 +42,15 @@ def _setup_logging(verbose: bool) -> None:
 
 
 def _fetch_unanalysed(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
+    # COALESCE(body_en, body): for non-English posts the extraction step
+    # stored an English translation in body_en — feed that to the LLM so the
+    # 4-prompt chain always reasons over English. English posts have body_en
+    # NULL and fall back to the original body. Aliased `body` so the rest of
+    # this module (and chain.py) needs no change.
     return conn.execute(
         """
-        SELECT rp.id, rp.thread_title, rp.category, rp.body
+        SELECT rp.id, rp.thread_title, rp.category,
+               COALESCE(rp.body_en, rp.body) AS body
         FROM raw_posts rp
         WHERE rp.processed_at IS NOT NULL
           AND NOT EXISTS (

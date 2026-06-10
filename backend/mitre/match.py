@@ -2,10 +2,10 @@
 
 Two paths per post:
 
-1. Verify LLM candidates: the techniques_json column from Stage 4 is a list of
-   {id, name, evidence} dicts. For each, check whether the id exists in the
-   corpus -- 'llm_verified' if yes, 'llm_unverified' if no (LLM hallucinated
-   or referenced a deprecated/sub-technique not in the loaded corpus).
+1. Verify LLM candidates: the techniques_json column from llm_analyses is a
+   list of {id, name, evidence} dicts. For each, check whether the id exists
+   in the corpus -- 'llm_verified' if yes, 'llm_unverified' if no (LLM
+   hallucinated or referenced a deprecated/sub-technique not loaded).
 
 2. Semantic discovery: embed the post body, compute cosine similarity against
    every technique vector, take the top-k whose score >= threshold. Skip any
@@ -43,9 +43,9 @@ def normalise_tcode(raw: str) -> str | None:
 
 
 def parse_llm_candidates(techniques_json: str | None) -> list[dict]:
-    """Stage 4's techniques_json holds {techniques: [...], behaviour: [...]} or
-    sometimes just [...]. We normalise to a list of dicts with at least id +
-    optional name/evidence.
+    """The LLM techniques_json column holds {techniques: [...], behaviour: [...]}
+    or sometimes just [...]. We normalise to a list of dicts with at least id
+    + optional name/evidence.
     """
     if not techniques_json:
         return []

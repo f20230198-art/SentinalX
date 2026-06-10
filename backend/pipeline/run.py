@@ -1,7 +1,16 @@
 """Extraction pipeline entrypoint.
 
-Reads unprocessed rows from raw_posts (processed_at IS NULL), runs IOC + NER
+Reads unprocessed rows from raw_posts (processed_at IS NULL), detects each
+post's language, translates non-English posts to English, runs IOC + NER
 extraction, persists results to iocs / entities, and stamps processed_at.
+
+Multilingual ingestion:
+    Before extraction, each post's language is detected (langdetect). When the
+    body is not English, it is translated to English (argostranslate, offline)
+    and stored in raw_posts.body_en. IOC regexes run on the ORIGINAL body
+    (IOCs are language-agnostic and translation can mangle long hashes); NER
+    runs on the English text so spaCy's en_core_web_sm stays effective. The
+    LLM and MITRE matchers downstream read body_en too.
 
 Usage:
     python -m backend.pipeline.run --once
@@ -18,6 +27,7 @@ import sys
 import time
 
 from backend.db.store import Store
+from backend.lang import detect_language, translate_to_english
 from backend.pipeline.extract import (
     EntityExtractor,
     IOCExtractor,
@@ -37,10 +47,50 @@ def _setup_logging(verbose: bool) -> None:
 
 def _fetch_unprocessed(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
     return conn.execute(
-        "SELECT id, body FROM raw_posts WHERE processed_at IS NULL "
+        "SELECT id, body, lang, body_en FROM raw_posts WHERE processed_at IS NULL "
         "ORDER BY id LIMIT ?",
         (limit,),
     ).fetchall()
+
+
+def _resolve_language(row: sqlite3.Row) -> tuple[str, float | None, str | None]:
+    """Detect language and translate the post body if it is not English.
+
+    Returns (lang, lang_confidence, body_en):
+      * lang            ISO code, or 'unknown'.
+      * lang_confidence langdetect probability, or None for 'unknown'.
+      * body_en         English translation, or None when the post is already
+                        English / undetectable (no translation stored).
+
+    If a previous run already populated `row["lang"]`, that result is trusted
+    and we don't re-detect — keeps re-extraction (--reset on iocs/entities only)
+    cheap. A full language re-run is `pipeline.run --reset`, which clears these.
+    """
+    # Already resolved on an earlier pass — reuse it.
+    if row["lang"]:
+        return row["lang"], None, row["body_en"]
+
+    det = detect_language(row["body"])
+    if not det.needs_translation:
+        # No translation needed. This covers three cases:
+        #   - genuinely English  -> store 'en'
+        #   - undetectable       -> store 'unknown'
+        #   - a low-confidence non-English guess on a jargon/IOC-heavy post,
+        #     which we deliberately treat as English (see DetectionResult.
+        #     needs_translation) -> normalise to 'en' so the UI doesn't badge
+        #     it with a language we didn't actually trust.
+        effective = det.lang if det.lang in ("en", "unknown") else "en"
+        return effective, det.confidence, None
+
+    tr = translate_to_english(row["body"], det.lang)
+    if not tr.ok:
+        # Translation degraded (no package / offline). Keep the detected
+        # language so the UI can still flag the post, but store no body_en;
+        # downstream stages fall back to the original body.
+        log.warning("post translation degraded lang=%s — using original body",
+                    det.lang)
+        return det.lang, det.confidence, None
+    return det.lang, det.confidence, tr.text
 
 
 def _insert_iocs(conn: sqlite3.Connection, raw_post_id: int, matches, now: float) -> int:
@@ -81,6 +131,10 @@ def process_batch(
 ) -> tuple[int, int, int]:
     """Process up to batch_size unprocessed posts.
 
+    For each post: detect language, translate non-English bodies to English,
+    then extract IOCs (from the original body) and entities (from the English
+    text). Persists language fields + body_en alongside the extraction state.
+
     Returns (posts_seen, iocs_inserted, entities_inserted).
     """
     conn = store.conn
@@ -100,13 +154,23 @@ def process_batch(
         rows = _fetch_unprocessed(conn, batch_size)
         for row in rows:
             now = time.time()
+
+            # Language detection + translation. body_en is the English text
+            # NER + LLM should see; None means "post is English, use body".
+            lang, lang_conf, body_en = _resolve_language(row)
+            english_text = body_en or row["body"]
+
+            # IOCs from the ORIGINAL body — they're language-agnostic and
+            # translation can corrupt long hashes / BTC addresses. NER from the
+            # English text — spaCy's en_core_web_sm is English-only.
             iocs = dedupe(ioc.extract(row["body"]))
-            ents = dedupe(ent.extract(row["body"]))
+            ents = dedupe(ent.extract(english_text))
             iocs_inserted += _insert_iocs(conn, row["id"], iocs, now)
             entities_inserted += _insert_entities(conn, row["id"], ents, now)
             conn.execute(
-                "UPDATE raw_posts SET processed_at = ? WHERE id = ?",
-                (now, row["id"]),
+                "UPDATE raw_posts SET processed_at = ?, lang = ?, "
+                "lang_confidence = ?, body_en = ? WHERE id = ?",
+                (now, lang, lang_conf, body_en, row["id"]),
             )
             posts_seen += 1
         conn.commit()
@@ -149,9 +213,13 @@ def run_watch(
 
 
 def reset_extractions(store: Store) -> None:
+    # Also clears the language fields so a re-run re-detects and re-translates
+    # from scratch (re-extraction is the only way to refresh body_en — there is
+    # no separate language-step cursor).
     store.conn.executescript(
         "DELETE FROM iocs; DELETE FROM entities; DELETE FROM extraction_runs;"
-        "UPDATE raw_posts SET processed_at = NULL;"
+        "UPDATE raw_posts SET processed_at = NULL, lang = NULL, "
+        "  lang_confidence = NULL, body_en = NULL;"
         "DELETE FROM sqlite_sequence WHERE name IN ('iocs','entities','extraction_runs');"
     )
     store.conn.commit()
@@ -183,7 +251,8 @@ def main(argv: list[str] | None = None) -> int:
         store.close()
         return 0
 
-    log.info("loading spaCy model en_core_web_sm")
+    log.info("loading spaCy model en_core_web_sm "
+             "(language detection + translation enabled)")
     ent = EntityExtractor()
     ioc = IOCExtractor()
 

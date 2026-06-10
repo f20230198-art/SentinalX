@@ -16,6 +16,8 @@ backend/.venv/
 *.db
 *.sqlite
 *.sqlite3
+*.bak
+*.bak-*
 # ...except the pre-enriched demo DB that ships with the deploy.
 !backend/db/sentinelx.db
 
@@ -40,6 +42,7 @@ data/mitre/*.npy
 # Editors
 .vscode/
 .idea/
+.claude/
 *.swp
 .DS_Store
 Thumbs.db

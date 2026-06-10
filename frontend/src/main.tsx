@@ -4,6 +4,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import "./index.css";
+// Side-effect import: initialises i18next before any component renders.
+import "./i18n";
 
 const queryClient = new QueryClient({
   defaultOptions: {

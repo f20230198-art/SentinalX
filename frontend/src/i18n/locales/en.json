@@ -1,0 +1,74 @@
+{
+  "nav": {
+    "console": "CONSOLE",
+    "feed": "FEED",
+    "mitre": "MITRE",
+    "investigations": "INVESTIGATIONS",
+    "scout": "SCOUT"
+  },
+  "common": {
+    "loading": "loading…",
+    "noData": "no data",
+    "close": "CLOSE",
+    "cancel": "CANCEL",
+    "create": "CREATE",
+    "rerun": "RERUN",
+    "enter": "Enter",
+    "online": "ONLINE",
+    "down": "DOWN",
+    "checking": "checking…",
+    "live": "LIVE",
+    "indexing": "INDEXING",
+    "language": "Language"
+  },
+  "home": {
+    "sectionStatus": "System status",
+    "sectionFeed": "Intelligence feed",
+    "sectionMitre": "Mitre activity",
+    "topTechniques": "top techniques",
+    "heroTitle": "OBSERVING THE DARK",
+    "heroBody": "A continuous threat-intelligence pipeline. Scrapes a synthetic .onion forum over Tor, extracts IOCs and entities, runs a local LLM chain against every post, and maps behaviours to MITRE ATT&CK. Built end-to-end as a learning project, every layer real.",
+    "statPosts": "POSTS INDEXED",
+    "statTechniques": "TECHNIQUE LINKS",
+    "statIocs": "IOCS EXTRACTED",
+    "health": "health: {{status}}",
+    "postsIndexed": "{{count}} posts indexed",
+    "loadingFeed": "loading feed…"
+  },
+  "post": {
+    "title": "POST #{{id}}",
+    "llmSummary": "LLM SUMMARY",
+    "body": "BODY",
+    "bodyOriginal": "ORIGINAL ({{lang}})",
+    "bodyTranslated": "ENGLISH (TRANSLATED)",
+    "showOriginal": "show original",
+    "showTranslation": "show translation",
+    "translatedNote": "Translated from {{language}} — analysis ran on the English text.",
+    "mitreTechniques": "MITRE TECHNIQUES ({{count}})",
+    "defensiveRecommendations": "DEFENSIVE RECOMMENDATIONS ({{count}})",
+    "mitigationsNote": "MITRE ATT&CK mitigations for this post's techniques.",
+    "iocs": "IOCS ({{count}})",
+    "entities": "ENTITIES ({{count}})",
+    "pivotHint": "pivot on this IOC"
+  },
+  "feed": {
+    "title": "Intelligence feed",
+    "searchPlaceholder": "search posts…",
+    "filterCategory": "category",
+    "filterIntent": "intent",
+    "noResults": "no posts match"
+  },
+  "language": {
+    "en": "English",
+    "ru": "Russian",
+    "es": "Spanish",
+    "zh": "Chinese",
+    "fa": "Persian",
+    "de": "German",
+    "fr": "French",
+    "uk": "Ukrainian",
+    "pt": "Portuguese",
+    "ar": "Arabic",
+    "unknown": "Unknown"
+  }
+}

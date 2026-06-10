@@ -1,0 +1,74 @@
+{
+  "nav": {
+    "console": "CONSOLA",
+    "feed": "FLUJO",
+    "mitre": "MITRE",
+    "investigations": "INVESTIGACIONES",
+    "scout": "EXPLORADOR"
+  },
+  "common": {
+    "loading": "cargando…",
+    "noData": "sin datos",
+    "close": "CERRAR",
+    "cancel": "CANCELAR",
+    "create": "CREAR",
+    "rerun": "REEJECUTAR",
+    "enter": "Entrar",
+    "online": "EN LÍNEA",
+    "down": "CAÍDO",
+    "checking": "verificando…",
+    "live": "EN VIVO",
+    "indexing": "INDEXANDO",
+    "language": "Idioma"
+  },
+  "home": {
+    "sectionStatus": "Estado del sistema",
+    "sectionFeed": "Flujo de inteligencia",
+    "sectionMitre": "Actividad MITRE",
+    "topTechniques": "técnicas principales",
+    "heroTitle": "OBSERVANDO LA RED OSCURA",
+    "heroBody": "Un canal continuo de inteligencia de amenazas. Rastrea un foro sintético .onion a través de Tor, extrae IOC y entidades, ejecuta una cadena LLM local sobre cada publicación y asigna comportamientos a MITRE ATT&CK. Construido de extremo a extremo como proyecto de aprendizaje, con cada capa real.",
+    "statPosts": "PUBLICACIONES INDEXADAS",
+    "statTechniques": "ENLACES DE TÉCNICAS",
+    "statIocs": "IOC EXTRAÍDOS",
+    "health": "estado: {{status}}",
+    "postsIndexed": "{{count}} publicaciones indexadas",
+    "loadingFeed": "cargando flujo…"
+  },
+  "post": {
+    "title": "PUBLICACIÓN #{{id}}",
+    "llmSummary": "RESUMEN LLM",
+    "body": "CONTENIDO",
+    "bodyOriginal": "ORIGINAL ({{lang}})",
+    "bodyTranslated": "INGLÉS (TRADUCIDO)",
+    "showOriginal": "ver original",
+    "showTranslation": "ver traducción",
+    "translatedNote": "Traducido del {{language}} — el análisis se realizó sobre el texto en inglés.",
+    "mitreTechniques": "TÉCNICAS MITRE ({{count}})",
+    "defensiveRecommendations": "RECOMENDACIONES DEFENSIVAS ({{count}})",
+    "mitigationsNote": "Mitigaciones de MITRE ATT&CK para las técnicas de esta publicación.",
+    "iocs": "IOC ({{count}})",
+    "entities": "ENTIDADES ({{count}})",
+    "pivotHint": "pivotar sobre este IOC"
+  },
+  "feed": {
+    "title": "Flujo de inteligencia",
+    "searchPlaceholder": "buscar publicaciones…",
+    "filterCategory": "categoría",
+    "filterIntent": "intención",
+    "noResults": "ninguna publicación coincide"
+  },
+  "language": {
+    "en": "Inglés",
+    "ru": "Ruso",
+    "es": "Español",
+    "zh": "Chino",
+    "fa": "Persa",
+    "de": "Alemán",
+    "fr": "Francés",
+    "uk": "Ucraniano",
+    "pt": "Portugués",
+    "ar": "Árabe",
+    "unknown": "Desconocido"
+  }
+}

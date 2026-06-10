@@ -20,8 +20,16 @@ CREATE TABLE IF NOT EXISTS raw_posts (
     fetched_at          REAL    NOT NULL,
     -- Which forum this post came from. 'darkbay' for the original JSON-API
     -- forum; an .onion host (or a label) for posts pulled by the generic HTML
-    -- scraper. Added in Stage 2.5; defaults to 'darkbay' for pre-existing rows.
-    source              TEXT    NOT NULL DEFAULT 'darkbay'
+    -- scraper. Defaults to 'darkbay' for any pre-existing rows on migration.
+    source              TEXT    NOT NULL DEFAULT 'darkbay',
+    -- Multilingual ingestion. Detected ISO 639-1 language of `body`
+    -- ('en','ru','zh',…) or 'unknown' when undetectable. body_en holds the
+    -- English translation when lang != 'en'; it is NULL for English posts (no
+    -- translation needed). lang_confidence is langdetect's 0..1 probability.
+    -- All three are filled by the extraction step before IOC/NER run.
+    lang                TEXT,
+    lang_confidence     REAL,
+    body_en             TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_raw_posts_source_created ON raw_posts(source_created_at);
@@ -40,7 +48,7 @@ CREATE TABLE IF NOT EXISTS scraper_runs (
     error           TEXT
 );
 
--- Stage 3: extraction layer.
+-- Extraction layer.
 --
 -- iocs: one row per (post, type, value). Indicators of Compromise pulled out
 --       of post bodies via regex over a defanged-then-normalised copy of the
@@ -92,15 +100,15 @@ CREATE TABLE IF NOT EXISTS extraction_runs (
     error           TEXT
 );
 
--- Stage 4: local LLM (Mistral via Ollama) analyses.
+-- Local LLM (Mistral via Ollama) analyses.
 --
 -- llm_analyses: one row per raw_post. Holds the four sub-stage outputs of the
 --               prompt chain — summary, intent, targets, techniques — plus the
 --               raw JSON of each LLM response for debugging / reproducibility.
 --
 -- post_processing_state: per-stage cursor table. Keyed by (raw_post_id, stage)
---                        so Stages 4, 5, ... can each track their own progress
---                        without piling more columns onto raw_posts.
+--                        so each enrichment step (llm, mitre, …) can track its
+--                        own progress without piling more columns onto raw_posts.
 --
 -- llm_runs: audit log mirroring scraper_runs / extraction_runs.
 
@@ -141,7 +149,7 @@ CREATE TABLE IF NOT EXISTS llm_runs (
     error           TEXT
 );
 
--- Stage 5: MITRE ATT&CK ingest + vector index.
+-- MITRE ATT&CK ingest + vector index.
 --
 -- mitre_techniques: one row per Enterprise ATT&CK technique (and sub-technique).
 --                   Embedding is stored as a raw float32 BLOB so we can mmap-load
@@ -197,7 +205,7 @@ CREATE TABLE IF NOT EXISTS mitre_runs (
     error               TEXT
 );
 
--- Stage 5.5: MITRE ATT&CK mitigations (defensive recommendations).
+-- MITRE ATT&CK mitigations (defensive recommendations).
 --
 -- The same Enterprise ATT&CK STIX file we already parse for techniques also
 -- contains 'course-of-action' objects (the official mitigations, Mxxxx codes)
@@ -230,7 +238,7 @@ CREATE TABLE IF NOT EXISTS technique_mitigations (
 CREATE INDEX IF NOT EXISTS idx_tm_technique  ON technique_mitigations(technique_id);
 CREATE INDEX IF NOT EXISTS idx_tm_mitigation ON technique_mitigations(mitigation_id);
 
--- Stage 6.5: investigations layer.
+-- Investigations layer.
 --
 -- An investigation is a named, replayable view: a saved filter over the corpus
 -- plus an optional cross-post LLM summary written through one of four "lenses"
@@ -263,7 +271,7 @@ CREATE TABLE IF NOT EXISTS investigations (
 
 CREATE INDEX IF NOT EXISTS idx_investigations_created ON investigations(created_at DESC);
 
--- Stage 9: on-demand pipeline jobs.
+-- On-demand pipeline jobs.
 --
 -- A pipeline job is one end-to-end run triggered from the UI by pasting an
 -- .onion URL: scrape (HTML) -> extract -> LLM -> MITRE -> mitigations. The job

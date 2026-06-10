@@ -499,6 +499,14 @@ function PostBranch({
         >
           <span className="text-accent">#{post.id}</span>
           <span>{post.category.toUpperCase()}</span>
+          {post.lang && post.lang !== "en" && post.lang !== "unknown" && (
+            <span
+              className="px-1 border border-accent/40 text-accent"
+              title={`translated from ${post.lang.toUpperCase()}`}
+            >
+              {post.lang.toUpperCase()} ⇄
+            </span>
+          )}
           <span className="opacity-60">{timeLabel(post.source_created_at)}</span>
           {post.intent && (
             <span

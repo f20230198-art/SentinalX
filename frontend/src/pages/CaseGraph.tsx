@@ -16,7 +16,7 @@ import { SectionDivider } from "../components/Shell";
 import { DetailPanel } from "../components/DetailPanel";
 
 /* ----------------------------------------------------------------------- *
- * Case-file graph (Stage 8 polish).
+ * Case-file graph.
  *
  * Route: /investigations/:id/graph
  *

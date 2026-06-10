@@ -154,6 +154,57 @@ TEMPLATES: list[tuple[str, str, str]] = [
     ),
 ]
 
+# Non-English threads. Real darknet CTI is heavily multilingual — Russian and
+# Spanish forums carry some of the earliest signal. These templates exercise
+# the Stage-7 pipeline: language detection + offline translation before
+# extraction/LLM. IOC placeholders are kept verbatim (IPs, CVEs, BTC, hashes
+# are language-agnostic and IOC regexes run on the *original* body), so a
+# translated post still yields the same indicators as an English one.
+#
+# Tuple shape: (lang, category, title_template, body_template).
+MULTILINGUAL_TEMPLATES: list[tuple[str, str, str, str]] = [
+    (
+        "ru",
+        "access",
+        "[ПРОДАЮ] RDP доступ -- {industry}, права домен-админа",
+        "Есть свежий доступ уровня домен-админ к сети ({industry}). Около "
+        "{users} пользователей, {hosts} хостов. Стабильно держится {days} "
+        "дней. Цена: 0.{price} BTC на кошелёк {btc}. Шлюз подтверждён через "
+        "{ip}. Развёрнут {malware} для постэксплуатации. Пишите в ЛС для "
+        "пруфов, цена окончательная.",
+    ),
+    (
+        "ru",
+        "vulnerabilities",
+        "{cve} -- рабочий эксплойт, неаутентифицированный RCE",
+        "Написал рабочий PoC под {cve} в продукте {product}. Без "
+        "аутентификации, креды не нужны. Сбрасывает маяк на {ip}, порт 4444. "
+        "Протестировано на пропатченной сборке -- всё ещё пробивает. SHA256 "
+        "архива с эксплойтом: {sha}. Группировка {actor} уже использует это "
+        "в дикой природе. Отдаю за 0.{price} BTC.",
+    ),
+    (
+        "es",
+        "credentials",
+        "[FRESCO] {n}M combos de {service} -- {pct}% válidos",
+        "Volcado de la brecha de {service}. {n}M de líneas correo:clave. "
+        "Verificación privada dio {pct}% válido contra el login en vivo. "
+        "Muestra: alice@example.com:Hunter2! El espejo está en {domain} y el "
+        "SHA256 del archivo es {sha}. Solo pago en BTC a {btc}. Sin reembolsos.",
+    ),
+    (
+        "es",
+        "access",
+        "[VENDO] credenciales VPN -- {industry}",
+        "Tengo credenciales VPN funcionando para una {industry}. Acceso "
+        "confirmado por su gateway en {ip}. El SSO es Okta y el phishlet de "
+        "okta-sso[.]help sigue activo. La infraestructura C2 usa {malware}. "
+        "Pido 0.{price} BTC. Prefiero compradores tipo {actor}, nada de "
+        "script kiddies.",
+    ),
+]
+
+
 REPLY_TEMPLATES = [
     "vouch, dealt with op last month, legit.",
     "scam. pulled this exact dump from a leak in {date}.",
@@ -187,7 +238,13 @@ def random_post_body(category: str, base_ts: float) -> tuple[str, str]:
         candidates = TEMPLATES
     _, title_tpl, body_tpl = random.choice(candidates)
 
-    fields = {
+    fields = _random_fields()
+    return title_tpl.format(**fields), body_tpl.format(**fields)
+
+
+def _random_fields() -> dict[str, object]:
+    """The shared placeholder pool used by every post template."""
+    return {
         "industry": random.choice(INDUSTRIES),
         "users": random.choice([400, 1200, 3500, 8000, 15000]),
         "hosts": random.choice([80, 250, 900, 3000]),
@@ -214,7 +271,18 @@ def random_post_body(category: str, base_ts: float) -> tuple[str, str]:
         ).strftime("%Y-%m"),
         "domain": random.choice(FAKE_DOMAINS),
     }
-    return title_tpl.format(**fields), body_tpl.format(**fields)
+
+
+def random_multilingual_post() -> tuple[str, str, str]:
+    """Render a random non-English thread.
+
+    Returns (category, title, body) drawn from MULTILINGUAL_TEMPLATES — used to
+    salt the corpus with Russian/Spanish posts so the Stage-7 detect+translate
+    path has real data to exercise.
+    """
+    lang, category, title_tpl, body_tpl = random.choice(MULTILINGUAL_TEMPLATES)
+    fields = _random_fields()
+    return category, title_tpl.format(**fields), body_tpl.format(**fields)
 
 
 def random_reply_body() -> str:
@@ -236,12 +304,20 @@ def seed(conn: sqlite3.Connection, n_threads: int) -> None:
     threads_inserted = 0
     posts_inserted = 0
 
+    multilingual_count = 0
     for i in range(n_threads):
-        category = random.choice(CATEGORIES)
         author = random.choice(USERS)
         # Spread thread creation over last 14 days.
         thread_ts = now - random.uniform(0, 14 * 86400)
-        title, op_body = random_post_body(category, thread_ts)
+
+        # ~20% of threads are non-English, to exercise the Stage-7
+        # detect + translate pipeline. The rest use the English templates.
+        if random.random() < 0.20:
+            category, title, op_body = random_multilingual_post()
+            multilingual_count += 1
+        else:
+            category = random.choice(CATEGORIES)
+            title, op_body = random_post_body(category, thread_ts)
 
         cur = conn.execute(
             "INSERT INTO threads (title, category, author, created_at) VALUES (?, ?, ?, ?)",
@@ -271,7 +347,8 @@ def seed(conn: sqlite3.Connection, n_threads: int) -> None:
             posts_inserted += 1
 
     conn.commit()
-    print(f"seeded {threads_inserted} threads / {posts_inserted} posts -> {DB_PATH}")
+    print(f"seeded {threads_inserted} threads / {posts_inserted} posts "
+          f"({multilingual_count} non-English) -> {DB_PATH}")
 
 
 def main() -> None:

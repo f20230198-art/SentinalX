@@ -1,14 +1,15 @@
-"""Prompt templates for the 4-stage analysis chain.
+"""Prompt templates for the 4-prompt analysis chain.
 
-Each prompt is a function that takes the post body + Stage-3 structured context
-and returns (system_prompt, user_prompt, json_mode). Keeping them as small
-functions (not f-strings at module scope) lets us shape the context block —
-the truncation, the IOC formatting, the entity grouping — in one place.
+Each prompt is a function that takes the post body + structured extraction
+context (IOCs, entities) and returns (system_prompt, user_prompt, json_mode).
+Keeping them as small functions (not f-strings at module scope) lets us shape
+the context block — the truncation, the IOC formatting, the entity grouping —
+in one place.
 
 Design notes:
-- We pass the Stage-3 IOCs/entities into every prompt as a `KNOWN FACTS` block.
-  This stops the LLM from re-deriving (and often hallucinating) atoms we
-  already have ground truth for.
+- We pass the extracted IOCs/entities into every prompt as a `KNOWN FACTS`
+  block. This stops the LLM from re-deriving (and often hallucinating) atoms
+  we already have ground truth for.
 - Bodies are clipped to 4000 characters. Mistral 7B has an 8k context window
   but we share it with the system prompt + facts block + completion budget.
   In the seed corpus the longest post is ~2k chars; the clip is a safety belt.
@@ -32,7 +33,7 @@ def _clip(text: str, n: int = MAX_BODY_CHARS) -> str:
 
 
 def _format_facts(iocs: list[dict], entities: list[dict]) -> str:
-    """Render Stage-3 outputs as a compact bulleted block.
+    """Render the extraction-step outputs as a compact bulleted block.
 
     iocs:     [{ioc_type, value}, ...]
     entities: [{label, text}, ...]

@@ -1,4 +1,6 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
 import { Link } from "react-router-dom";
 import { api, type PostDetail, type PostMitigation } from "../lib/api";
@@ -16,6 +18,7 @@ export function DetailPanel({
   id: number | null;
   onClose: () => void;
 }) {
+  const { t } = useTranslation();
   const detail = useQuery({
     queryKey: ["post", id],
     queryFn: () => api.post(id!),
@@ -35,18 +38,20 @@ export function DetailPanel({
           <div className="px-6 py-5">
             <div className="flex items-center justify-between mb-4">
               <span className="font-mono text-[11px] tracking-[0.2em] text-accent">
-                POST #{id}
+                {t("post.title", { id })}
               </span>
               <button
                 onClick={onClose}
                 className="font-mono text-xs text-text-muted hover:text-accent border border-border-soft px-2 py-1"
               >
-                [ CLOSE ]
+                [ {t("common.close")} ]
               </button>
             </div>
 
             {detail.isLoading && (
-              <div className="font-mono text-xs text-text-muted">loading…</div>
+              <div className="font-mono text-xs text-text-muted">
+                {t("common.loading")}
+              </div>
             )}
             {detail.data && <DetailBody d={detail.data} />}
           </div>
@@ -57,11 +62,19 @@ export function DetailPanel({
 }
 
 function DetailBody({ d }: { d: PostDetail }) {
+  const { t } = useTranslation();
+  // A post is "translated" when the backend stored an English translation —
+  // i.e. it was non-English. body_en is null for English posts (and for posts
+  // ingested before multilingual support landed).
+  const isTranslated = !!d.post.body_en && d.post.lang !== "en";
   return (
     <div className="space-y-5">
       <header>
-        <div className="font-mono text-[10px] tracking-[0.2em] text-text-muted">
-          {d.post.category.toUpperCase()} · {d.post.author}
+        <div className="font-mono text-[10px] tracking-[0.2em] text-text-muted flex items-center gap-2">
+          <span>
+            {d.post.category.toUpperCase()} · {d.post.author}
+          </span>
+          {isTranslated && <LanguageBadge lang={d.post.lang} />}
         </div>
         <h2 className="font-display text-xl mt-1 leading-tight">
           {d.post.thread_title}
@@ -76,21 +89,23 @@ function DetailBody({ d }: { d: PostDetail }) {
 
       {d.analysis?.summary && (
         <section>
-          <SectionLabel>LLM SUMMARY</SectionLabel>
+          <SectionLabel>{t("post.llmSummary")}</SectionLabel>
           <p className="text-sm leading-relaxed">{d.analysis.summary}</p>
         </section>
       )}
 
-      <section>
-        <SectionLabel>BODY</SectionLabel>
-        <pre className="font-mono text-xs whitespace-pre-wrap leading-relaxed text-text/90 bg-surface-1/40 border border-border-soft p-3">
-          {d.post.body}
-        </pre>
-      </section>
+      <PostBody
+        body={d.post.body}
+        bodyEn={d.post.body_en}
+        lang={d.post.lang}
+        isTranslated={isTranslated}
+      />
 
       {d.techniques.length > 0 && (
         <section>
-          <SectionLabel>MITRE TECHNIQUES ({d.techniques.length})</SectionLabel>
+          <SectionLabel>
+            {t("post.mitreTechniques", { count: d.techniques.length })}
+          </SectionLabel>
           <ul className="space-y-1 font-mono text-xs">
             {d.techniques.map((t) => (
               <li key={t.technique_id + t.source} className="flex gap-2">
@@ -112,10 +127,10 @@ function DetailBody({ d }: { d: PostDetail }) {
       {d.mitigations.length > 0 && (
         <section>
           <SectionLabel>
-            DEFENSIVE RECOMMENDATIONS ({d.mitigations.length})
+            {t("post.defensiveRecommendations", { count: d.mitigations.length })}
           </SectionLabel>
           <p className="font-mono text-[10px] text-text-muted mb-2 leading-relaxed">
-            MITRE ATT&amp;CK mitigations for this post's techniques.
+            {t("post.mitigationsNote")}
           </p>
           <ul className="space-y-2">
             {d.mitigations.map((m) => (
@@ -127,14 +142,14 @@ function DetailBody({ d }: { d: PostDetail }) {
 
       {d.iocs.length > 0 && (
         <section>
-          <SectionLabel>IOCS ({d.iocs.length})</SectionLabel>
+          <SectionLabel>{t("post.iocs", { count: d.iocs.length })}</SectionLabel>
           <ul className="space-y-0.5 font-mono text-xs">
             {d.iocs.map((i, idx) => (
               <li key={idx}>
                 <Link
                   to={`/iocs/${encodeURIComponent(i.value)}`}
                   className="inline-flex items-baseline gap-2 px-1 py-0.5 hover:text-accent hover:bg-accent/5 transition-colors"
-                  title="pivot on this IOC"
+                  title={t("post.pivotHint")}
                 >
                   <span className="text-text-muted">{i.ioc_type}</span>
                   <span className="text-text break-all">{i.value}</span>
@@ -147,7 +162,9 @@ function DetailBody({ d }: { d: PostDetail }) {
 
       {d.entities.length > 0 && (
         <section>
-          <SectionLabel>ENTITIES ({d.entities.length})</SectionLabel>
+          <SectionLabel>
+            {t("post.entities", { count: d.entities.length })}
+          </SectionLabel>
           <ul className="space-y-0.5 font-mono text-xs">
             {d.entities.map((e, idx) => (
               <li key={idx}>
@@ -159,6 +176,90 @@ function DetailBody({ d }: { d: PostDetail }) {
         </section>
       )}
     </div>
+  );
+}
+
+/** Human-readable name for an ISO language code, via the i18n catalog.
+ *  Falls back to the upper-cased code for languages not in the catalog. */
+function useLanguageName() {
+  const { t } = useTranslation();
+  return (lang: string | null): string => {
+    if (!lang) return t("language.unknown");
+    const key = `language.${lang}`;
+    const name = t(key);
+    return name === key ? lang.toUpperCase() : name;
+  };
+}
+
+/** Small pill in the post header marking a translated (non-English) post. */
+function LanguageBadge({ lang }: { lang: string | null }) {
+  const languageName = useLanguageName();
+  return (
+    <span
+      className="inline-flex items-center gap-1 border border-accent/40 text-accent px-1.5 py-0.5 text-[9px] tracking-[0.15em]"
+      title={languageName(lang)}
+    >
+      <span>⇄</span>
+      <span>{(lang ?? "??").toUpperCase()} → EN</span>
+    </span>
+  );
+}
+
+/** Post body section. For a translated post it shows the English translation
+ *  by default with a toggle to the original-language source; the LLM analysis
+ *  ran on the English text, so that is the more useful default view. */
+function PostBody({
+  body,
+  bodyEn,
+  lang,
+  isTranslated,
+}: {
+  body: string;
+  bodyEn: string | null;
+  lang: string | null;
+  isTranslated: boolean;
+}) {
+  const { t } = useTranslation();
+  const languageName = useLanguageName();
+  const [showOriginal, setShowOriginal] = useState(false);
+
+  // English (or legacy) post: render the body plainly, no toggle.
+  if (!isTranslated || !bodyEn) {
+    return (
+      <section>
+        <SectionLabel>{t("post.body")}</SectionLabel>
+        <pre className="font-mono text-xs whitespace-pre-wrap leading-relaxed text-text/90 bg-surface-1/40 border border-border-soft p-3">
+          {body}
+        </pre>
+      </section>
+    );
+  }
+
+  const displayed = showOriginal ? body : bodyEn;
+  return (
+    <section>
+      <div className="flex items-center justify-between mb-2">
+        <SectionLabel>
+          {showOriginal
+            ? t("post.bodyOriginal", { lang: (lang ?? "??").toUpperCase() })
+            : t("post.bodyTranslated")}
+        </SectionLabel>
+        <button
+          onClick={() => setShowOriginal((v) => !v)}
+          className="font-mono text-[10px] text-text-muted hover:text-accent border border-border-soft px-2 py-0.5"
+        >
+          {showOriginal ? t("post.showTranslation") : t("post.showOriginal")}
+        </button>
+      </div>
+      {!showOriginal && (
+        <p className="font-mono text-[10px] text-text-muted mb-2 leading-relaxed">
+          {t("post.translatedNote", { language: languageName(lang) })}
+        </p>
+      )}
+      <pre className="font-mono text-xs whitespace-pre-wrap leading-relaxed text-text/90 bg-surface-1/40 border border-border-soft p-3">
+        {displayed}
+      </pre>
+    </section>
   );
 }
 

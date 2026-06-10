@@ -34,9 +34,9 @@ class Store:
     def _init_schema(self) -> None:
         with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
             self.conn.executescript(f.read())
-        # processed_at was added in Stage 3, source in Stage 2.5. Add them
-        # idempotently for DBs created before then — SQLite has no
-        # IF NOT EXISTS for ADD COLUMN, so we check PRAGMA table_info first.
+        # Idempotent column adds for DBs created before later features landed.
+        # SQLite has no IF NOT EXISTS for ADD COLUMN, so check PRAGMA table_info
+        # first and skip columns that already exist.
         cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(raw_posts)")}
         if "processed_at" not in cols:
             self.conn.execute("ALTER TABLE raw_posts ADD COLUMN processed_at REAL")
@@ -48,8 +48,19 @@ class Store:
             self.conn.execute(
                 "ALTER TABLE raw_posts ADD COLUMN source TEXT NOT NULL DEFAULT 'darkbay'"
             )
+        # Multilingual columns. Left NULL until the extraction step backfills
+        # them (a --reset re-extract will populate every row).
+        if "lang" not in cols:
+            self.conn.execute("ALTER TABLE raw_posts ADD COLUMN lang TEXT")
+        if "lang_confidence" not in cols:
+            self.conn.execute("ALTER TABLE raw_posts ADD COLUMN lang_confidence REAL")
+        if "body_en" not in cols:
+            self.conn.execute("ALTER TABLE raw_posts ADD COLUMN body_en TEXT")
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_raw_posts_source ON raw_posts(source)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_raw_posts_lang ON raw_posts(lang)"
         )
         self.conn.commit()
 

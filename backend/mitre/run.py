@@ -6,8 +6,8 @@ Two operations driven by the same CLI:
                     parse it, embed every technique, and upsert into
                     mitre_techniques. Idempotent; skips download if cached.
 
-  --once / --watch  For each post that has been Stage-4-analysed but not yet
-                    Stage-5-matched: verify the LLM's candidate T-codes against
+  --once / --watch  For each post that has been LLM-analysed but not yet
+                    MITRE-matched: verify the LLM's candidate T-codes against
                     the corpus, then run semantic top-k discovery against the
                     full corpus. Persist matches into post_techniques.
 
@@ -17,7 +17,7 @@ Two operations driven by the same CLI:
   --reset-corpus    Wipe mitre_techniques (forces re-ingest next run).
 
 Cursor:
-    Posts where post_processing_state has stage='llm' (Stage 4 done)
+    Posts where post_processing_state has stage='llm' (LLM analysis done)
     AND not yet present in post_processing_state for stage='mitre'.
 
 Usage:
@@ -187,9 +187,13 @@ def _fetch_unmatched(
         else "EXISTS (SELECT 1 FROM post_processing_state pps_llm "
              "WHERE pps_llm.raw_post_id = rp.id AND pps_llm.stage = 'llm')"
     )
+    # COALESCE(body_en, body): semantic matching embeds the post text against
+    # the ATT&CK corpus (English). For non-English posts the English
+    # translation lives in body_en — use it so the MiniLM cosine search isn't
+    # comparing Russian/Chinese text to English technique descriptions.
     return conn.execute(
         f"""
-        SELECT rp.id, rp.body, la.techniques_json
+        SELECT rp.id, COALESCE(rp.body_en, rp.body) AS body, la.techniques_json
         FROM raw_posts rp
         LEFT JOIN llm_analyses la ON la.raw_post_id = rp.id
         WHERE {gate}

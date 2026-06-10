@@ -124,7 +124,7 @@ def _run_stages(
     ollama_url: str,
     skip_llm: bool,
 ) -> None:
-    # --- Stage 1: scrape (HTML) --------------------------------------- #
+    # --- Step 1: scrape (HTML) ---------------------------------------- #
     _update(conn, job_id, status="running", stage="scraping",
             message=f"crawling {onion_url}")
     log.info("job %d: scraping %s", job_id, onion_url)
@@ -163,7 +163,7 @@ def _run_stages(
         log.info("job %d: 0 new posts, but %d pending — draining pipeline",
                  job_id, pending)
 
-    # --- Stage 2: extract (spaCy NER + regex IOCs) -------------------- #
+    # --- Step 2: extract (spaCy NER + regex IOCs) --------------------- #
     _update(conn, job_id, stage="extracting", message="extracting IOCs + entities")
     log.info("job %d: extracting", job_id)
 
@@ -180,7 +180,7 @@ def _run_stages(
     _update(conn, job_id, posts_extracted=extracted,
             message=f"extracted IOCs from {extracted} posts")
 
-    # --- Stage 3: LLM enrichment (skippable; graceful if Ollama down) - #
+    # --- Step 3: LLM enrichment (skippable; graceful if Ollama down) -- #
     if skip_llm:
         log.info("job %d: LLM stage skipped (fast mode)", job_id)
         _update(conn, job_id, stage="llm", llm_skipped=1,
@@ -189,7 +189,7 @@ def _run_stages(
     else:
         llm_ok = _try_llm(conn, store, job_id, ollama_url)
 
-    # --- Stage 4: MITRE mapping + mitigations ------------------------ #
+    # --- Step 4: MITRE mapping + mitigations -------------------------- #
     _update(conn, job_id, stage="mitre", message="mapping to MITRE ATT&CK")
     log.info("job %d: MITRE matching", job_id)
 

@@ -1,4 +1,4 @@
-"""PDF export for investigations (Stage 8).
+"""PDF export for investigations.
 
 Renders an investigation as a single styled PDF: cover page with metadata and
 the lens summary (with [#NNN] citations turned into footnote-style references),

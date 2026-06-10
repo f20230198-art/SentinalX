@@ -1,4 +1,4 @@
-"""Embedding utilities for Stage 5.
+"""Embedding utilities for MITRE technique matching.
 
 We use sentence-transformers' all-MiniLM-L6-v2 (384-dim, fast on CPU,
 industry-standard sentence embedding model). Vectors are L2-normalised so

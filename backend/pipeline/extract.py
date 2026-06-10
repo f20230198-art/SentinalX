@@ -58,9 +58,9 @@ _DOMAIN_RE = re.compile(
     r"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[A-Za-z]{2,24}\b"
 )
 
-# Curated keyword lists. Tiny on purpose — Stage 5 (MITRE + vector index) is
-# where real coverage comes from. These are just enough to demonstrate the
-# pattern and to give the seed data something to hit.
+# Curated keyword lists. Tiny on purpose — the MITRE matcher (vector index)
+# is where real coverage comes from. These are just enough to give the seed
+# data named-entity hits before the LLM and MITRE stages run.
 _MALWARE_TERMS = {
     "Cobalt Strike", "Mimikatz", "Emotet", "TrickBot", "Ryuk", "Conti",
     "LockBit", "BlackCat", "ALPHV", "REvil", "Sodinokibi", "Maze",
