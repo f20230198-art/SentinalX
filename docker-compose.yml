@@ -2,10 +2,9 @@
 #
 # Two synthetic darknet forums, each behind its own Tor hidden service:
 #
-#   forum  / tor        -> DarkBay   (onion_service/, tor_config/)
+#   forum  / tor        -> DarkBay   (darknet/darkbay/)
 #                          phpBB-style board WITH a JSON API.
-#   silkvault / tor-sv  -> SilkVault (onion_service_silkvault/,
-#                          tor_config_silkvault/) -- a structurally different
+#   silkvault / tor-sv  -> SilkVault (darknet/silkvault/) -- a structurally different
 #                          forum with NO JSON API, HTML pages only. It exists
 #                          to prove the SentinelX scraper is not hardcoded to
 #                          one site or one response format.
@@ -16,14 +15,14 @@
 #
 # Hidden-service keypairs are bind-mounted so each .onion address stays stable
 # across rebuilds. Read them with:
-#   cat tor_config/hidden_service/hostname
-#   cat tor_config_silkvault/hidden_service/hostname
+#   cat darknet/darkbay/tor/hidden_service/hostname
+#   cat darknet/silkvault/tor/hidden_service/hostname
 
 services:
   # --- DarkBay: forum #1 (JSON API) ------------------------------------ #
   forum:
     build:
-      context: ./onion_service
+      context: ./darknet/darkbay/forum
       dockerfile: Dockerfile
     container_name: sentinelx-forum
     restart: unless-stopped
@@ -40,7 +39,7 @@ services:
 
   tor:
     build:
-      context: ./tor_config
+      context: ./darknet/darkbay/tor
       dockerfile: Dockerfile
     container_name: sentinelx-tor
     restart: unless-stopped
@@ -52,12 +51,12 @@ services:
       - "127.0.0.1:9050:9050"
     volumes:
       # Persist the .onion keypair so the address is stable across rebuilds.
-      - ./tor_config/hidden_service:/var/lib/tor/sentinelx_forum
+      - ./darknet/darkbay/tor/hidden_service:/var/lib/tor/sentinelx_forum
 
   # --- SilkVault: forum #2 (HTML only, no API) ------------------------- #
   silkvault:
     build:
-      context: ./onion_service_silkvault
+      context: ./darknet/silkvault/forum
       dockerfile: Dockerfile
     container_name: sentinelx-silkvault
     restart: unless-stopped
@@ -74,7 +73,7 @@ services:
 
   tor-sv:
     build:
-      context: ./tor_config_silkvault
+      context: ./darknet/silkvault/tor
       dockerfile: Dockerfile
     container_name: sentinelx-tor-silkvault
     restart: unless-stopped
@@ -86,7 +85,7 @@ services:
       - "127.0.0.1:9051:9050"
     volumes:
       # Persist SilkVault's .onion keypair so its address is stable.
-      - ./tor_config_silkvault/hidden_service:/var/lib/tor/silkvault_forum
+      - ./darknet/silkvault/tor/hidden_service:/var/lib/tor/silkvault_forum
 
 volumes:
   forum_data:

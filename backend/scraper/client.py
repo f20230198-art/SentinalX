@@ -18,7 +18,7 @@ from typing import Any
 import httpx
 
 DEFAULT_SOCKS_PROXY = "socks5://127.0.0.1:9050"
-DEFAULT_HOSTNAME_FILE = Path(__file__).resolve().parents[2] / "tor_config" / "hidden_service" / "hostname"
+DEFAULT_HOSTNAME_FILE = Path(__file__).resolve().parents[2] / "darknet" / "darkbay" / "tor" / "hidden_service" / "hostname"
 
 # Tor circuits are slow. Generous timeouts.
 DEFAULT_TIMEOUT = httpx.Timeout(connect=30.0, read=60.0, write=30.0, pool=60.0)

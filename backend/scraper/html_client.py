@@ -71,7 +71,7 @@ def _source_id_offset(source: str) -> int:
 # Where SilkVault's Tor writes its .onion hostname on the host.
 SILKVAULT_HOSTNAME_FILE = (
     Path(__file__).resolve().parents[2]
-    / "tor_config_silkvault" / "hidden_service" / "hostname"
+    / "darknet" / "silkvault" / "tor" / "hidden_service" / "hostname"
 )
 
 

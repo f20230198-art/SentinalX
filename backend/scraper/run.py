@@ -142,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
                         "so plain socks5:// works for .onion (do NOT use socks5h:// — httpx rejects it). "
                         "SilkVault's Tor is on socks5://127.0.0.1:9051.")
     p.add_argument("--onion", default=None,
-                   help="override .onion hostname (default: read from tor_config/hidden_service/hostname)")
+                   help="override .onion hostname (default: read from darknet/darkbay/tor/hidden_service/hostname)")
     p.add_argument("--db", default=None, help="override DB path")
     p.add_argument("-v", "--verbose", action="store_true")
 
@@ -151,7 +151,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="use the generic HTML scraper instead of the JSON API")
     p.add_argument("--url", default=None,
                    help="forum base URL or .onion host for --html mode "
-                        "(default: read from tor_config_silkvault/hidden_service/hostname)")
+                        "(default: read from darknet/silkvault/tor/hidden_service/hostname)")
     p.add_argument("--source", default=None,
                    help="label recorded on every scraped row identifying the forum "
                         "(--html default: the forum host)")
