@@ -1,5 +1,5 @@
 # Tor daemon image for SilkVault (SentinelX synthetic darknet forum #2).
-# A second, independent Tor instance from tor_config/ so SilkVault publishes
+# A second, independent Tor instance from darknet/darkbay/tor/ so SilkVault publishes
 # its own distinct .onion address.
 #
 # Runs as root long enough to fix bind-mount ownership at startup, then drops

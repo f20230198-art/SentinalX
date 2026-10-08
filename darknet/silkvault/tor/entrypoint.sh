@@ -4,7 +4,7 @@
 # in as root-owned regardless of what the image set, and Tor refuses to start
 # if HiddenServiceDir isn't owned by the running user with mode 700.
 #
-# Identical in shape to tor_config/entrypoint.sh — only the HS dir name differs.
+# Identical in shape to darknet/darkbay/tor/entrypoint.sh — only the HS dir name differs.
 set -e
 
 HS_DIR=/var/lib/tor/silkvault_forum

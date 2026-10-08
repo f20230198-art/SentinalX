@@ -29,8 +29,7 @@ build/
 *.local
 
 # Tor keys & hidden service state (NEVER commit these)
-tor_config/hidden_service/
-tor_config_silkvault/hidden_service/
+darknet/*/tor/hidden_service/
 *.key
 hostname
 
@@ -46,6 +45,15 @@ data/mitre/*.npy
 *.swp
 .DS_Store
 Thumbs.db
+
+# Personal study notes and design-tool state (local only, never pushed)
+learning/
+.impeccable/
+
+# Build caches
+*.tsbuildinfo
+*.db-shm
+*.db-wal
 
 # Logs
 *.log

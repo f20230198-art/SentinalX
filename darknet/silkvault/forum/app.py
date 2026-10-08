@@ -2,7 +2,7 @@
 SilkVault — synthetic darknet forum #2 (Flask app).
 
 This is SentinelX's *second* synthetic .onion forum, built deliberately
-*different* from DarkBay (onion_service/). Its job is to prove the scraper is
+*different* from DarkBay (darknet/darkbay/forum/). Its job is to prove the scraper is
 not hardcoded to one site: where DarkBay exposes a convenient JSON API,
 SilkVault exposes **only HTML pages** — exactly like a real darknet forum. The
 scraper must therefore parse markup to ingest SilkVault.

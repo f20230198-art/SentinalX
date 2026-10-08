@@ -7,7 +7,7 @@
 #      .onion address to the Flask forum container at forum:5000 inside the
 #      docker-compose network.
 #   3. Stores the hidden service's keypair + hostname under
-#      /var/lib/tor/sentinelx_forum/ — this dir is bind-mounted to ./tor_config/
+#      /var/lib/tor/sentinelx_forum/ — this dir is bind-mounted to ./darknet/darkbay/tor/
 #      hidden_service on the host, so the .onion address is stable across
 #      container rebuilds.
 

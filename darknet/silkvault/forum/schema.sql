@@ -1,6 +1,6 @@
 -- SilkVault synthetic darknet forum schema.
 --
--- A second, deliberately *different* forum from DarkBay (onion_service/). It
+-- A second, deliberately *different* forum from DarkBay (darknet/darkbay/forum/). It
 -- exists to prove the SentinelX scraper is not hardcoded to one site: SilkVault
 -- has no JSON API at all — only HTML pages — so the scraper must parse markup.
 --
