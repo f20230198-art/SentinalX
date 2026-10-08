@@ -74,8 +74,8 @@ export function Investigations() {
         trailing={list.isLoading ? "Loading…" : `${items.length} saved`}
       />
 
-      <div className="grid grid-cols-12 gap-x-10 gap-y-8">
-        <aside className="col-span-12 lg:col-span-4">
+      <div className="grid grid-cols-12 gap-y-8 lg:gap-x-10">
+        <aside className="col-span-12 min-w-0 lg:col-span-4">
           <div className="mb-3 flex items-center justify-between">
             <h3 className="m-0 text-sm font-bold">Case files</h3>
             <button onClick={() => setCreating((v) => !v)} className={creating ? btn : btnPrimary}>
@@ -134,7 +134,7 @@ export function Investigations() {
           </ul>
         </aside>
 
-        <section className="col-span-12 lg:col-span-8">
+        <section className="col-span-12 min-w-0 lg:col-span-8">
           {selectedId === null ? (
             <div className="border border-dashed border-border-soft p-8 text-sm text-text-muted">
               Select a case file to read its lens summary. Every <span className="font-mono">[#id]</span> in
@@ -248,7 +248,7 @@ function InvestigationDetail({
             </div>
           )}
           {data.summary ? (
-            <div className="max-w-[75ch] whitespace-pre-wrap border-l-2 border-rule bg-surface-1 py-4 pr-5 pl-5 text-[15px] leading-relaxed">
+            <div className="max-w-[75ch] whitespace-pre-wrap [overflow-wrap:anywhere] border-l-2 border-rule bg-surface-1 py-4 pr-5 pl-5 text-[15px] leading-relaxed">
               <CitationText text={data.summary} onSelect={onSelectPost} />
             </div>
           ) : (

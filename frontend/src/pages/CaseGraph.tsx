@@ -86,7 +86,7 @@ export function CaseGraph() {
 
       <div className="mb-6 flex flex-wrap items-baseline gap-x-4 gap-y-1">
         <h1 className="m-0 text-2xl font-extrabold tracking-[-0.02em]">
-          <span className="mr-2 font-mono text-base font-normal text-text-muted">#{inv.data?.id}</span>
+          <span className="mr-2 font-mono text-[1rem] font-normal text-text-muted">#{inv.data?.id}</span>
           {inv.data?.name}
         </h1>
         <span className="text-sm text-text-muted">

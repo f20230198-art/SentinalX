@@ -164,7 +164,7 @@ export function IocPivot() {
               <Link
                 key={c.type + c.value}
                 to={`/iocs/${encodeURIComponent(c.value)}`}
-                className="border border-border-soft bg-surface-1 px-2 py-1 font-mono text-xs no-underline hover:border-text"
+                className="max-w-full border border-border-soft bg-surface-1 px-2 py-1 font-mono text-xs no-underline [overflow-wrap:anywhere] hover:border-text"
                 title={`Appears in ${c.n} of these posts`}
               >
                 <span

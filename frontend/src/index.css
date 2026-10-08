@@ -156,3 +156,10 @@ table, .tabular, time {
   from { opacity: 0; transform: translateY(-6px); }
   to { opacity: 1; transform: none; }
 }
+
+/* Long unbroken tokens (hashes, URLs, wallet addresses) in post text must
+ * wrap inside their box instead of pushing it wider. */
+pre,
+code {
+  overflow-wrap: anywhere;
+}

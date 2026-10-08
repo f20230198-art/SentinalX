@@ -293,7 +293,7 @@ export function Timeline() {
             <tbody key={key}>
               <tr>
                 <th colSpan={6} scope="colgroup" className="border-b-2 border-rule pt-8 pb-1.5 text-left">
-                  <span className="text-base font-bold">{dayLabel(key)}</span>
+                  <span className="text-[1rem] font-bold">{dayLabel(key)}</span>
                   <span className="ml-3 font-normal text-text-muted tabular-nums">{list.length} posts</span>
                 </th>
               </tr>

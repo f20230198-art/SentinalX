@@ -3,9 +3,11 @@
 Read-only HTTP layer over the SQLite store. Joins enrichment from Stages 2-5
 into per-post views and exposes aggregate stats for the dashboard.
 
-A single sqlite3 connection per process (with check_same_thread=False) is
-sufficient: SQLite serialises reads internally and the pipeline workers are
-the only writers — they hold their own connections.
+Each worker thread gets its own sqlite3 connection (see _PerThreadConn).
+FastAPI runs sync endpoints on a thread pool, and one connection shared
+across threads lets concurrent requests interleave cursors — the dashboard
+fires many /posts/{id} calls at once, which surfaced as random 500s/404s.
+The pipeline workers are the only writers and hold their own connections.
 
 Run:
     backend/.venv/Scripts/python.exe -m uvicorn backend.api.main:app --reload --port 8000
@@ -16,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -60,6 +63,36 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+class _PerThreadConn:
+    """Looks like one sqlite3.Connection, but each thread gets its own.
+
+    Endpoints keep calling ``app.state.conn.execute(...)``; the attribute
+    lookup is routed to the calling thread's connection, opened on first use.
+    """
+
+    def __init__(self) -> None:
+        self._local = threading.local()
+        self._all: list[sqlite3.Connection] = []
+        self._lock = threading.Lock()
+
+    def _get(self) -> sqlite3.Connection:
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = self._local.conn = _connect()
+            with self._lock:
+                self._all.append(conn)
+        return conn
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._get(), name)
+
+    def close(self) -> None:
+        with self._lock:
+            for c in self._all:
+                c.close()
+            self._all.clear()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Open a Store once at startup purely to apply schema.sql — its
@@ -70,7 +103,7 @@ async def lifespan(app: FastAPI):
     from backend.db.store import Store
 
     Store(DB_PATH).close()
-    app.state.conn = _connect()
+    app.state.conn = _PerThreadConn()
     try:
         yield
     finally:

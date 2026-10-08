@@ -252,7 +252,7 @@ function ResultGroup({
   return (
     <section>
       <div className="mb-1 flex items-baseline border-b-2 border-rule pb-1.5">
-        <h3 className="m-0 text-base font-bold">{title}</h3>
+        <h3 className="m-0 text-[1rem] font-bold">{title}</h3>
         <span className="ml-auto text-sm text-text-muted tabular-nums">{meta}</span>
       </div>
       {results.length === 0 ? (

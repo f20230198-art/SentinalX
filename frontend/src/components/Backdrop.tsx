@@ -46,9 +46,9 @@ export function Backdrop() {
             <circle cx="2" cy="2" r="2.2" fill={DOT} />
           </pattern>
         </defs>
-        <circle cx="1260" cy="150" r="130" fill="url(#bd-dots)" />
+        <circle cx="1330" cy="-20" r="130" fill="url(#bd-dots)" />
         <circle cx="1480" cy="860" r="150" fill="url(#bd-dots)" />
-        <circle cx="230" cy="130" r="46" fill="none" stroke={WAVE_HI} strokeWidth="12" />
+        <circle cx="40" cy="520" r="46" fill="none" stroke={WAVE_HI} strokeWidth="12" />
         <circle cx="1120" cy="1080" r="40" fill="none" stroke={RED} strokeOpacity="0.35" strokeWidth="11" />
       </motion.svg>
     </div>

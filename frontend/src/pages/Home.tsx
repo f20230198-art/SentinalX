@@ -98,7 +98,7 @@ function Finding({ stats, onCite }: { stats: Stats | undefined; onCite: (id: num
 
         {top && (
           <div className="mt-8 max-w-[62ch]">
-            <p className="m-0 text-base text-text-muted">
+            <p className="m-0 text-[1rem] text-text-muted">
               <span className="font-mono text-text">{top.technique_id}</span> ·{" "}
               {t("home.findingProvenance", {
                 verified: top.verified,

@@ -57,8 +57,8 @@ export function Alerts() {
         trailing={alerts.data ? `${alerts.data.unseen} unseen · checked every 20 s` : "Loading…"}
       />
 
-      <div className="grid grid-cols-12 gap-x-10 gap-y-8">
-        <aside className="col-span-12 lg:col-span-4">
+      <div className="grid grid-cols-12 gap-y-8 lg:gap-x-10">
+        <aside className="col-span-12 min-w-0 lg:col-span-4">
           <form
             className="mb-6 space-y-3 border border-text bg-surface-1 p-4"
             onSubmit={(e) => {
@@ -130,9 +130,9 @@ export function Alerts() {
           </ul>
         </aside>
 
-        <section className="col-span-12 lg:col-span-8">
+        <section className="col-span-12 min-w-0 lg:col-span-8">
           <div className="mb-2 flex items-baseline border-b-2 border-rule pb-1.5">
-            <h3 className="m-0 text-base font-bold">Mentions</h3>
+            <h3 className="m-0 text-[1rem] font-bold">Mentions</h3>
             {unseen.length > 0 && (
               <button onClick={() => seen.mutate(undefined)} className="ml-auto text-sm font-semibold text-accent underline">
                 Mark all {unseen.length} as seen
