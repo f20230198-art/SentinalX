@@ -197,6 +197,9 @@ a:hover { color: #f0c068; }
     color: var(--ink-dim);
     padding: 8px 16px;
     font-size: 12px;
+    background: transparent;
+    font-family: inherit;
+    cursor: pointer;
 }
 .btn-ghost:hover { border-color: var(--amber-dim); color: var(--ink); }
 

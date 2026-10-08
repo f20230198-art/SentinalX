@@ -185,6 +185,20 @@ export function Discover() {
             </p>
           ))}
 
+          {/* Both counts up front: the dark-web group sits below a possibly
+              long corpus list and is easy to miss otherwise. */}
+          <p className="m-0 text-sm text-text-muted">
+            <span className="font-semibold text-text tabular-nums">{known.length}</span> already collected
+            {useReal && (
+              <>
+                {" · "}
+                <a href="#dark-web-results" className="font-semibold text-accent underline tabular-nums">
+                  {fresh.length} new on the dark web ↓
+                </a>
+              </>
+            )}
+          </p>
+
           <ResultGroup
             title="Already in your corpus"
             meta={`${known.length} matches`}
@@ -198,6 +212,7 @@ export function Discover() {
           />
 
           {useReal && (
+            <div id="dark-web-results" className="scroll-mt-24">
             <ResultGroup
               title="New on the dark web"
               meta={`${fresh.length} pages`}
@@ -210,6 +225,7 @@ export function Discover() {
                 </label>
               )}
             />
+            </div>
           )}
         </div>
       )}

@@ -905,9 +905,14 @@ async def events_stream(request: Request, since_id: int = Query(0, ge=0)):
             if await request.is_disconnected():
                 break
 
-            for payload in await run_in_threadpool(_new_posts, last):
+            batch = await run_in_threadpool(_new_posts, last)
+            for payload in batch:
                 yield f"id: {payload['id']}\nevent: post\ndata: {json.dumps(payload)}\n\n"
                 last = payload["id"]
+            # A full batch means we're still replaying history: send the next
+            # one straight away instead of trickling 50 posts every 2 s.
+            if len(batch) == 50:
+                continue
 
             now = asyncio.get_event_loop().time()
             if now - last_ping > 15:

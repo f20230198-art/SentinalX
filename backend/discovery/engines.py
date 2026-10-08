@@ -160,6 +160,30 @@ def parse_results(html: str, engine: str, own_host: str = "") -> list[Result]:
     return out
 
 
+def _form_token(c: httpx.Client, search_url: str) -> str:
+    """Anti-bot token some engines require, as an extra '&name=value'.
+
+    Ahmia's home page carries a hidden <input> in its search form whose
+    name/value rotate; a search without it is redirected back to the home
+    page with no results. Do what a browser does: load the home page, copy
+    the hidden fields of the search form. Engines without one get ''.
+    """
+    parts = urlparse(search_url)
+    try:
+        home = c.get(f"{parts.scheme}://{parts.netloc}/")
+        form = BeautifulSoup(home.text, "html.parser").find("form")
+    except httpx.HTTPError:
+        return ""
+    if form is None:
+        return ""
+    fields = [
+        (i.get("name"), i.get("value", ""))
+        for i in form.find_all("input", type="hidden")
+        if i.get("name")
+    ]
+    return "".join(f"&{quote_plus(n)}={quote_plus(v)}" for n, v in fields)
+
+
 class OnionSearchEngine:
     needs_tor = True
 
@@ -173,6 +197,7 @@ class OnionSearchEngine:
         url = self.spec.url_template.format(q=quote_plus(query))
         with httpx.Client(proxy=self.proxy, timeout=TIMEOUT, follow_redirects=True,
                           headers={"User-Agent": "Mozilla/5.0"}) as c:
+            url += _form_token(c, url)
             r = c.get(url)
             r.raise_for_status()
         own = urlparse(url).netloc.lower()

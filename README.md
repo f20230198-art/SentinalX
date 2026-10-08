@@ -68,7 +68,7 @@ linked back to the text that produced it.
 | 🔗 | **IOC pivot & evidence graph** | Jump from any indicator to every post that mentions it. A force-directed graph shows posts, indicators and techniques; shared evidence pulls posts into clusters. |
 | 🗂️ | **Investigations & lenses** | Save a filter as a case. An analyst "lens" fuses the matching posts into one report with `[#id]` citations to the source posts. |
 | 📄 | **PDF export** | Cover page, cited summary, ATT&CK coverage chart and an appendix of cited posts. |
-| 🧭 | **Discover & Scout** | Search for candidate dark-web pages, or paste any `.onion` URL and watch the full pipeline run on it as a background job. |
+| 🧭 | **Discover & Scout** | Search for candidate dark-web pages (read by a generic page reader), or paste a forum's `.onion` URL and watch the full pipeline run on it as a background job. |
 | 🔔 | **Watchlists & alerts** | Save terms (a company name, a product); matching posts raise alerts. |
 | 🌍 | **UI languages** | English, Russian and Spanish. |
 

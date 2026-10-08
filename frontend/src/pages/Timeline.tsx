@@ -53,6 +53,11 @@ function dayLabel(key: string): string {
 const ARRIVAL_MS = 4500;
 const SETTLE_MS = 2500;
 
+// Posts received so far, kept at module level so they survive navigating away
+// and back: a return visit renders instantly and resumes the stream after the
+// newest id it has, instead of replaying the whole history again.
+const cache = { posts: new Map<number, TimelinePost>(), lastId: 0, historyDone: false };
+
 export function Timeline() {
   const [selected, setSelected] = useState<number | null>(null);
   // Filters live in the URL: views are shareable and survive a refresh.
@@ -70,23 +75,24 @@ export function Timeline() {
   const setFilter = (f: Filter) => setParam({ f: f === "all" ? null : f });
   const [cursor, setCursor] = useState(0);
   const searchRef = useRef<HTMLInputElement | null>(null);
-  const [posts, setPosts] = useState<Map<number, TimelinePost>>(new Map());
-  const [historyDone, setHistoryDone] = useState(false);
+  const [posts, setPosts] = useState<Map<number, TimelinePost>>(cache.posts);
+  const [historyDone, setHistoryDone] = useState(cache.historyDone);
   const [arriving, setArriving] = useState<Set<number>>(new Set());
   const [connected, setConnected] = useState(true);
-  const historyDoneRef = useRef(false);
+  const historyDoneRef = useRef(cache.historyDone);
 
   useEffect(() => {
-    const es = new EventSource(`${API_BASE}/events?since_id=0`);
+    const es = new EventSource(`${API_BASE}/events?since_id=${cache.lastId}`);
     let settle: number | undefined;
     const scheduleSettle = () => {
       window.clearTimeout(settle);
       settle = window.setTimeout(() => {
         historyDoneRef.current = true;
+        cache.historyDone = true;
         setHistoryDone(true);
       }, SETTLE_MS);
     };
-    scheduleSettle(); // an empty corpus still settles
+    if (!cache.historyDone) scheduleSettle(); // an empty corpus still settles
 
     const onPost = (ev: MessageEvent) => {
       let p: TimelinePost & { missing?: boolean };
@@ -96,7 +102,13 @@ export function Timeline() {
         return;
       }
       if (p.missing) return;
-      setPosts((prev) => (prev.has(p.id) ? prev : new Map(prev).set(p.id, p)));
+      cache.lastId = Math.max(cache.lastId, p.id);
+      setPosts((prev) => {
+        if (prev.has(p.id)) return prev;
+        const next = new Map(prev).set(p.id, p);
+        cache.posts = next;
+        return next;
+      });
       if (historyDoneRef.current) {
         setArriving((prev) => new Set(prev).add(p.id));
         window.setTimeout(

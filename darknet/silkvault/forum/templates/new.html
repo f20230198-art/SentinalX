@@ -41,8 +41,75 @@
     </label>
 
     <div class="form-actions">
+        <button type="button" class="btn-ghost" id="fill-sample" style="margin-right:auto;"
+                title="Demo helper: fill the form with a random realistic listing">fill random listing</button>
         <a class="btn-ghost" href="{{ url_for('index') }}">cancel</a>
         <button type="submit" class="btn-amber">post listing</button>
     </div>
 </form>
+
+<script>
+/* Demo helper for this synthetic forum: composes a random listing from
+ * parts, so every click differs (target, sector, IP, CVE, price, wallet)
+ * and each one carries indicators for SentinelX to extract. */
+(function () {
+  var pick = function (a) { return a[Math.floor(Math.random() * a.length)]; };
+  var n = function (lo, hi) { return lo + Math.floor(Math.random() * (hi - lo + 1)); };
+  var ip = function () { return pick(["45.142.212", "185.220.101", "91.92.240", "194.26.135", "162.247.74"]) + "." + n(2, 250); };
+  var btc = function () {
+    var c = "023456789acdefghjklmnpqrstuvwxyz", s = "bc1q";
+    for (var i = 0; i < 38; i++) s += c[n(0, c.length - 1)];
+    return s;
+  };
+  var hex = function (len) { var s = ""; for (var i = 0; i < len; i++) s += "0123456789abcdef"[n(0, 15)]; return s; };
+
+  var country, sector, vendor, price;
+  var templates = [
+    function () { return {
+      board: "network-access",
+      title: "[SELLING] VPN access -- " + country + " " + sector + ", domain admin",
+      body: "Got domain admin on a " + country + " " + sector + ". Entry through their " +
+        pick(["Fortinet", "Citrix", "Ivanti", "Palo Alto"]) + " VPN using " +
+        pick(["CVE-2024-21762", "CVE-2023-4966", "CVE-2024-3400", "CVE-2023-46805"]) +
+        ", no login needed. Beacon calls back to " + ip() + " on port " + pick(["443", "4444", "8443"]) +
+        ". Price " + price + " to " + btc() + ". Escrow ok, serious buyers only."
+    }; },
+    function () { return {
+      board: "data-leaks",
+      title: "FRESH leak: " + n(80, 900) + "k customers, " + country + " " + sector,
+      body: "Full customer database: names, emails, phone numbers, md5 passwords. Sample hash " + hex(32) +
+        ". We got in by phishing an admin with a fake " + pick(["Okta", "Microsoft 365", "Google Workspace"]) +
+        " login page hosted on " + pick(["secure-login", "sso-verify", "account-check"]) + "[.]" + pick(["com", "net", "support"]) +
+        ". Selling for " + n(8, 40) * 100 + " USDT, sample on request."
+    }; },
+    function () { return {
+      board: "exploits",
+      title: "0day pre-auth RCE in " + pick(["FortiOS SSL-VPN", "Ivanti Connect Secure", "ConnectWise ScreenConnect", "MOVEit Transfer"]),
+      body: "Working exploit, tested on a patched build from last month, still pops. Similar to " +
+        pick(["CVE-2024-21762", "CVE-2024-1709", "CVE-2023-34362"]) + " but unpatched. Drops an implant calling back to " +
+        ip() + ". sha256 of the zip: " + hex(64) + ". " + n(2, 6) + " BTC, one buyer only."
+    }; },
+    function () { return {
+      board: "malware",
+      title: "Ransomware affiliate program -- recruiting pentesters",
+      body: "Need people with Active Directory experience. " + pick(["80/20", "75/25", "70/30"]) +
+        " split. Locker encrypts ESXi and Windows, deletes shadow copies before encryption. Panel C2 at " + ip() +
+        ". First target list includes a " + country + " " + sector + ". Contact on tox."
+    }; }
+  ];
+
+  document.getElementById("fill-sample").addEventListener("click", function () {
+    country = pick(["Indian", "German", "Australian", "Canadian", "UK", "Brazilian", "Spanish"]);
+    sector = pick(["bank", "hospital", "telecom", "logistics firm", "insurance company", "energy utility", "university"]);
+    vendor = pick(["gh0stline", "n3cr0", "rdp_king", "dataleakr", "phishmaster", "access_broker", "vault_vendor", "z3r0day"]);
+    price = (n(15, 90) / 100).toFixed(2) + " BTC";
+    var l = pick(templates)();
+    var f = document.querySelector(".new-form").elements;
+    f["title"].value = l.title;
+    f.board.value = l.board;
+    f.vendor.value = vendor;
+    f.body.value = l.body;
+  });
+})();
+</script>
 {% endblock %}
