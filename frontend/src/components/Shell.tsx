@@ -1,81 +1,71 @@
 import { Link, NavLink } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { useCrtMode } from "../hooks/useCrtMode";
 import { WatchIndicator } from "./WatchIndicator";
 import { LanguageSwitcher } from "./LanguageSwitcher";
+import { Shortcuts } from "./Shortcuts";
+import { AlertBadge } from "./AlertBadge";
 
-// The bracketed index ("[01]") is decorative chrome and stays fixed; only the
-// label word is translated, via the i18n `key`.
 const NAV = [
-  { to: "/", index: "01", key: "nav.console" },
-  { to: "/posts", index: "02", key: "nav.feed" },
-  { to: "/techniques", index: "03", key: "nav.mitre" },
-  { to: "/investigations", index: "04", key: "nav.investigations" },
-  { to: "/scout", index: "05", key: "nav.scout" },
+  { to: "/", key: "nav.console" },
+  { to: "/posts", key: "nav.feed" },
+  { to: "/techniques", key: "nav.mitre" },
+  { to: "/investigations", key: "nav.investigations" },
+  { to: "/discover", key: "nav.discover" },
+  { to: "/scout", key: "nav.scout" },
 ];
 
 export function Header() {
-  const [crt, toggleCrt] = useCrtMode();
   const { t } = useTranslation();
   return (
-    <header className="relative z-10 border-b border-border-soft bg-base/80 backdrop-blur-sm">
-      <div className="max-w-[1440px] mx-auto px-8 py-4 flex items-center gap-8">
-        <Link to="/" className="font-display text-lg font-semibold tracking-tight">
-          <span className="text-accent">SENTINEL</span>
-          <span className="text-text">X</span>
-          <span className="text-text-muted font-mono text-xs ml-2">// I</span>
+    <header className="sticky top-0 z-30 border-b-2 border-rule bg-surface-1">
+      <div className="mx-auto flex max-w-[1440px] items-center gap-x-8 px-4 sm:px-8">
+        <Link to="/" className="py-3 text-lg font-extrabold tracking-[-0.03em] text-text no-underline">
+          SentinelX
         </Link>
-        <nav className="flex gap-6 ml-8">
+        {/* Scrolls horizontally on small screens instead of overflowing. */}
+        <nav aria-label="Primary" className="-mb-0.5 flex min-w-0 flex-1 gap-6 overflow-x-auto">
           {NAV.map((n) => (
             <NavLink
               key={n.to}
               to={n.to}
               end={n.to === "/"}
               className={({ isActive }) =>
-                `font-mono text-[11px] tracking-[0.2em] transition-colors ${
-                  isActive ? "text-accent" : "text-text-muted hover:text-text"
+                `whitespace-nowrap border-b-2 py-3.5 text-sm font-semibold no-underline transition-colors ${
+                  isActive
+                    ? "border-accent text-text"
+                    : "border-transparent text-text-muted hover:text-text"
                 }`
               }
             >
-              [{n.index}] {t(n.key)}
+              {t(n.key)}
             </NavLink>
           ))}
         </nav>
-        <div className="ml-auto flex items-center gap-3">
+        <div className="hidden items-center gap-3 md:flex">
           <LanguageSwitcher />
+          <AlertBadge />
           <WatchIndicator />
-          <button
-            onClick={toggleCrt}
-            className={`font-mono text-[10px] tracking-[0.2em] border px-3 py-1.5 transition-colors ${
-              crt
-                ? "border-accent text-accent"
-                : "border-border-soft text-text-muted hover:text-text"
-            }`}
-            aria-pressed={crt}
-          >
-            [ CRT ]
-          </button>
+          <Shortcuts />
         </div>
       </div>
     </header>
   );
 }
 
+/** Register section heading: heavy rule, title left, metadata right.
+ *  `index` is accepted for backwards compatibility and intentionally unused. */
 export function SectionDivider({
-  index,
   label,
   trailing,
 }: {
-  index: string;
+  index?: string;
   label: string;
   trailing?: string;
 }) {
   return (
-    <div className="section-divider my-12">
-      <span className="text-accent">[{index}]</span>
-      <span>// {label}</span>
-      <hr />
-      {trailing && <span className="text-text-muted">{trailing}</span>}
+    <div className="section-divider mt-14 mb-6">
+      <h2>{label}</h2>
+      {trailing && <span className="meta">{trailing}</span>}
     </div>
   );
 }

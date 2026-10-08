@@ -77,6 +77,25 @@ def verify_llm(candidates: list[dict], corpus_ids: set[str]) -> list[Match]:
     return out
 
 
+def chunk_text(text: str, max_words: int = 150, overlap: int = 30) -> list[str]:
+    """Split a post into overlapping word windows for embedding.
+
+    all-MiniLM-L6-v2 reads at most 256 word-pieces; anything after that is
+    silently truncated, so a technique described late in a long post would
+    never be seen. ~150 words stays under that limit with headroom for
+    word-piece splitting. The overlap keeps a sentence that straddles a
+    boundary intact in at least one chunk. Short posts return one chunk.
+    """
+    words = text.split()
+    if len(words) <= max_words:
+        return [text]
+    step = max_words - overlap
+    return [
+        " ".join(words[i:i + max_words])
+        for i in range(0, len(words) - overlap, step)
+    ]
+
+
 def semantic_topk(
     post_vec: np.ndarray,
     corpus_matrix: np.ndarray,
@@ -88,10 +107,17 @@ def semantic_topk(
     """Return up to topk Matches whose cosine score >= threshold and whose
     technique_id is not in `exclude`. Vectors are assumed L2-normalised so
     cosine = dot product.
+
+    `post_vec` is either one vector (D,) or a stack of chunk vectors (C, D).
+    With chunks, a technique's score is its BEST match over any chunk
+    (max-pooling), so one relevant paragraph is enough to surface it.
     """
     if corpus_matrix.shape[0] == 0:
         return []
-    scores = corpus_matrix @ post_vec  # (N,)
+    if post_vec.ndim == 2:
+        scores = (corpus_matrix @ post_vec.T).max(axis=1)  # (N, C) -> (N,)
+    else:
+        scores = corpus_matrix @ post_vec  # (N,)
     # Take more than topk so we can drop excluded ones and still have headroom.
     n_candidates = min(len(scores), topk + len(exclude) + 5)
     top_idx = np.argpartition(-scores, n_candidates - 1)[:n_candidates]

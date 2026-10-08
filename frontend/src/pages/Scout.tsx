@@ -1,8 +1,9 @@
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { motion, AnimatePresence } from "framer-motion";
 import { api, type ScrapeJob } from "../lib/api";
 import { SectionDivider } from "../components/Shell";
+import { QueryError } from "../components/Evidence";
 
 /* ----------------------------------------------------------------------- *
  * Scout — point SentinelX at an arbitrary darknet forum.
@@ -15,7 +16,7 @@ import { SectionDivider } from "../components/Shell";
 
 // The pipeline stages, in order — drives the progress checklist.
 const STAGES: { key: string; label: string }[] = [
-  { key: "scraping", label: "Scrape forum (HTML over Tor)" },
+  { key: "scraping", label: "Scrape the forum (HTML over Tor)" },
   { key: "extracting", label: "Extract IOCs + entities" },
   { key: "llm", label: "LLM enrichment" },
   { key: "mitre", label: "Map to MITRE ATT&CK" },
@@ -33,10 +34,15 @@ export function Scout() {
   const qc = useQueryClient();
   const [url, setUrl] = useState("");
   const [skipLlm, setSkipLlm] = useState(false);
-  const [activeJobId, setActiveJobId] = useState<number | null>(null);
+  const [params] = useSearchParams();
+  const [activeJobId, setActiveJobId] = useState<number | null>(
+    params.get("job") ? Number(params.get("job")) : null,
+  );
   const [formError, setFormError] = useState<string | null>(null);
 
   const jobs = useQuery({ queryKey: ["scrape-jobs"], queryFn: api.scrapeJobs });
+  // Shares the header pill's cache: warn before a run that Tor can't serve.
+  const health = useQuery({ queryKey: ["healthz", "full"], queryFn: api.healthzFull });
 
   // Poll the active job every 2s while it is queued/running.
   const active = useQuery({
@@ -64,11 +70,11 @@ export function Scout() {
     setFormError(null);
     const v = url.trim();
     if (!v) {
-      setFormError("paste a .onion URL first");
+      setFormError("Paste a .onion address first.");
       return;
     }
     if (!v.replace(/^https?:\/\//, "").split("/")[0].endsWith(".onion")) {
-      setFormError("that doesn't look like a .onion address");
+      setFormError("That isn't a .onion address. It should end in .onion, e.g. abcd…xyz.onion");
       return;
     }
     start.mutate({ onion_url: v, skip_llm: skipLlm });
@@ -86,120 +92,112 @@ export function Scout() {
     qc.invalidateQueries({ queryKey: ["scrape-jobs"] });
   }
 
-  return (
-    <div className="max-w-[1100px] mx-auto px-8">
-      <SectionDivider
-        index="05"
-        label="Scout"
-        trailing="point SentinelX at any darknet forum"
-      />
 
-      {/* --- the URL bar --- */}
-      <div className="border border-border-soft bg-surface-1/40 p-5">
-        <div className="font-mono text-[10px] tracking-[0.2em] text-text-muted mb-2">
-          TARGET FORUM
-        </div>
-        <div className="flex gap-2">
+  const torDown = health.data && health.data.checks.tor_socks?.status !== "up";
+  const llmDown = health.data && health.data.checks.ollama?.status !== "up";
+
+  return (
+    <div className="mx-auto max-w-[1100px] px-4 pb-24 sm:px-8">
+      <SectionDivider label="Scout" trailing="Run the full pipeline on any .onion forum" />
+
+      <form
+        className="border border-text bg-surface-1 p-5"
+        onSubmit={(e) => {
+          e.preventDefault();
+          submit();
+        }}
+      >
+        <label htmlFor="scout-url" className="mb-2 block text-sm font-bold">
+          Forum address
+        </label>
+        <div className="flex flex-col gap-2 sm:flex-row">
           <input
+            id="scout-url"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && submit()}
-            placeholder="paste a .onion address — e.g. abcd…xyz.onion"
-            className="flex-1 bg-base/60 border border-border-soft px-3 py-2 font-mono text-xs focus:border-accent outline-none"
+            placeholder="abcd…xyz.onion"
+            aria-invalid={!!formError}
+            aria-describedby="scout-help"
+            className="min-w-0 flex-1 border border-border-soft bg-surface-1 px-3 py-2 font-mono text-sm focus:border-text focus:outline-none"
           />
           <button
-            onClick={submit}
+            type="submit"
             disabled={start.isPending}
-            className="font-mono text-[11px] tracking-[0.2em] border border-accent text-accent px-4 py-2 hover:bg-accent/10 disabled:opacity-30 transition-colors whitespace-nowrap"
+            className="whitespace-nowrap border border-accent bg-accent px-4 py-2 text-sm font-semibold text-surface-1 hover:bg-accent-strong disabled:opacity-40"
           >
-            [ {start.isPending ? "STARTING…" : "RUN PIPELINE"} ]
+            {start.isPending ? "Starting…" : "Run pipeline"}
           </button>
         </div>
         {formError && (
-          <div className="font-mono text-[10px] text-danger mt-2">
+          <p role="alert" className="m-0 mt-2 text-sm font-semibold text-danger">
             {formError}
-          </div>
+          </p>
+        )}
+        {torDown && (
+          <p className="m-0 mt-3 border-l-2 border-warn pl-3 text-sm text-warn">
+            The Tor proxy is offline, so a run will stop at the scraping step. Start the Tor
+            containers (<span className="font-mono">docker compose up -d</span>) first.
+          </p>
         )}
 
-        <label className="flex items-center gap-2 mt-3 cursor-pointer select-none w-fit">
+        <label className="mt-4 flex w-fit cursor-pointer select-none items-start gap-2">
           <input
             type="checkbox"
             checked={skipLlm}
             onChange={(e) => setSkipLlm(e.target.checked)}
-            className="accent-accent"
+            className="mt-1 accent-[var(--color-text)]"
           />
-          <span className="font-mono text-[10px] text-text-muted">
-            FAST MODE — skip LLM enrichment{" "}
-            <span className="opacity-60">
-              (scrape + IOCs + MITRE only; use on battery)
+          <span className="text-sm">
+            <span className="font-semibold">Fast mode</span>
+            <span className="text-text-muted">
+              {" "}
+              skips LLM enrichment: scrape, IOCs and semantic ATT&amp;CK mapping only.
+              {llmDown && !skipLlm && " Ollama is offline, so runs will skip the LLM anyway."}
             </span>
           </span>
         </label>
 
-        <p className="font-mono text-[10px] text-text-muted mt-3 leading-relaxed">
-          SentinelX will scrape the forum's HTML over Tor, extract IOCs,{" "}
-          {skipLlm ? (
-            <span className="text-warn">skip LLM enrichment (fast mode),</span>
-          ) : (
-            "enrich each post with the local LLM,"
-          )}{" "}
-          and map it to MITRE ATT&amp;CK. Works on any SilkVault-structured
-          forum — bring up your own and paste its address.
+        <p id="scout-help" className="m-0 mt-3 max-w-[70ch] text-sm text-text-muted">
+          SentinelX crawls the forum's HTML over Tor, extracts IOCs,{" "}
+          {skipLlm ? "skips the LLM," : "enriches each post with the local LLM,"} and maps every post to
+          MITRE ATT&amp;CK. Works on any forum with SilkVault's page structure.
         </p>
-      </div>
+      </form>
 
-      {/* --- live progress for the active job --- */}
-      <AnimatePresence>
-        {active.data && (
-          <motion.div
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="mt-6"
-          >
-            <JobProgress job={active.data} />
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* --- recent jobs --- */}
-      <section className="mt-10">
-        <div className="font-mono text-[10px] tracking-[0.2em] text-text-muted mb-3">
-          RECENT RUNS
+      {active.data && (
+        <div className="mt-6">
+          <JobProgress job={active.data} />
         </div>
-        {jobs.isLoading && (
-          <div className="font-mono text-xs text-text-muted">loading…</div>
-        )}
+      )}
+
+      <section className="mt-10">
+        <h3 className="m-0 mb-3 border-t-2 border-rule pt-2 text-sm font-bold">Recent runs</h3>
+        {jobs.isError && <QueryError what="recent runs" error={jobs.error} onRetry={() => jobs.refetch()} />}
+        {jobs.isLoading && <p className="text-sm text-text-muted">Loading…</p>}
         {jobs.data && jobs.data.items.length === 0 && (
-          <div className="font-mono text-xs text-text-muted opacity-60 italic">
-            no pipeline runs yet — paste a forum URL above to start one.
-          </div>
+          <p className="text-sm text-text-muted">No runs yet. Paste a forum address above to start one.</p>
         )}
-        <ul className="space-y-1.5">
+        <ul className="m-0 list-none p-0">
           {jobs.data?.items.map((j) => (
             <li key={j.id}>
               <button
                 onClick={() => setActiveJobId(j.id)}
-                className={`w-full text-left border px-3 py-2 transition-colors ${
-                  activeJobId === j.id
-                    ? "border-accent bg-accent/5"
-                    : "border-border-soft hover:border-text-muted"
+                aria-current={activeJobId === j.id}
+                className={`flex w-full items-baseline gap-3 border-t border-border-soft py-2.5 pl-2 text-left text-sm hover:bg-surface-1 ${
+                  activeJobId === j.id ? "bg-surface-1 shadow-[inset_3px_0_0_var(--color-accent)]" : ""
                 }`}
               >
-                <div className="flex items-baseline gap-2 font-mono text-xs">
-                  <span className="text-text-muted">#{j.id}</span>
-                  <StatusPill status={j.status} />
-                  <span className="text-text truncate">{j.source}</span>
-                  <span className="ml-auto text-text-muted text-[10px]">
-                    {j.posts_scraped} scraped · {j.techniques_mapped} mapped
-                  </span>
-                </div>
+                <span className="w-10 font-mono text-text-muted">#{j.id}</span>
+                <StatusPill status={j.status} />
+                <span className="min-w-0 flex-1 truncate font-mono">{j.source}</span>
+                <span className="whitespace-nowrap pr-2 text-xs text-text-muted tabular-nums">
+                  {j.posts_scraped} scraped · {j.techniques_mapped} mapped
+                </span>
               </button>
             </li>
           ))}
         </ul>
       </section>
-
-      <div className="h-24" />
     </div>
   );
 }
@@ -209,18 +207,14 @@ function JobProgress({ job }: { job: ScrapeJob }) {
   const failed = job.status === "error";
 
   return (
-    <div className="border border-border-soft bg-surface-1/40 p-5">
-      <div className="flex items-baseline gap-3 mb-4">
-        <span className="font-mono text-[10px] text-text-muted">
-          JOB #{job.id}
-        </span>
+    <div className="border border-text bg-surface-1 p-5" aria-live="polite">
+      <div className="mb-4 flex flex-wrap items-baseline gap-3">
+        <span className="text-sm font-bold">Run #{job.id}</span>
         <StatusPill status={job.status} />
-        <span className="font-mono text-xs text-text truncate">
-          {job.onion_url}
-        </span>
+        <span className="min-w-0 truncate font-mono text-sm text-text-muted">{job.onion_url}</span>
       </div>
 
-      <ol className="space-y-2">
+      <ol className="m-0 list-none space-y-2 p-0">
         {STAGES.map((s, i) => {
           const state =
             failed && i === current
@@ -231,33 +225,28 @@ function JobProgress({ job }: { job: ScrapeJob }) {
                   ? "active"
                   : "pending";
           return (
-            <li
-              key={s.key}
-              className="flex items-center gap-3 font-mono text-xs"
-            >
-              <StageGlyph state={state} />
+            <li key={s.key} className="flex items-center gap-3 text-sm">
+              <StageMark state={state} />
               <span
                 className={
                   state === "pending"
-                    ? "text-text-muted opacity-50"
+                    ? "text-text-muted"
                     : state === "failed"
-                      ? "text-danger"
+                      ? "font-semibold text-danger"
                       : state === "active"
-                        ? "text-accent"
-                        : "text-text"
+                        ? "font-semibold"
+                        : ""
                 }
               >
                 {s.label}
               </span>
               {s.key === "llm" && state === "active" && (
-                <span className="text-text-muted text-[10px]">
+                <span className="text-xs text-text-muted">
                   {job.posts_llm > 0 ? `${job.posts_llm} posts` : "starting…"}
                 </span>
               )}
               {s.key === "llm" && job.llm_skipped === 1 && (
-                <span className="text-warn text-[10px]">
-                  skipped — Ollama unreachable
-                </span>
+                <span className="text-xs text-warn">skipped (Ollama offline or fast mode)</span>
               )}
             </li>
           );
@@ -265,64 +254,51 @@ function JobProgress({ job }: { job: ScrapeJob }) {
       </ol>
 
       {job.message && (
-        <div className="mt-4 font-mono text-[11px] text-text-muted border-t border-border-soft pt-3">
-          {job.message}
-        </div>
+        <p className="m-0 mt-4 border-t border-border-soft pt-3 text-sm text-text-muted">{job.message}</p>
       )}
       {job.error && (
-        <div className="mt-2 font-mono text-[11px] text-danger">
-          error: {job.error}
-        </div>
+        <p role="alert" className="m-0 mt-2 text-sm text-danger">
+          <span className="font-semibold">Run failed:</span> <span className="font-mono">{job.error}</span>
+        </p>
       )}
 
       {job.status === "done" && job.posts_scraped > 0 && (
-        <div className="mt-4 grid grid-cols-3 gap-2 font-mono text-xs">
-          <Stat n={job.posts_scraped} label="scraped" />
+        <dl className="m-0 mt-4 grid grid-cols-3 border-t border-border-soft pt-3 text-sm">
+          <Stat n={job.posts_scraped} label="posts scraped" />
           <Stat n={job.posts_llm} label="LLM-analysed" />
           <Stat n={job.techniques_mapped} label="ATT&CK mappings" />
-        </div>
+        </dl>
       )}
     </div>
   );
 }
 
-function StageGlyph({ state }: { state: string }) {
-  if (state === "done") return <span className="text-accent w-4">✓</span>;
-  if (state === "failed") return <span className="text-danger w-4">✗</span>;
-  if (state === "active")
-    return (
-      <motion.span
-        className="text-accent w-4"
-        animate={{ opacity: [1, 0.3, 1] }}
-        transition={{ duration: 1.2, repeat: Infinity }}
-      >
-        ▸
-      </motion.span>
-    );
-  return <span className="text-text-muted w-4 opacity-40">·</span>;
+/** Stage marker drawn as a shape: done = filled square, active = ring that
+ *  pulses (still under reduced motion), failed = red square, pending = hairline. */
+function StageMark({ state }: { state: string }) {
+  const cls =
+    state === "done"
+      ? "bg-text"
+      : state === "failed"
+        ? "bg-danger"
+        : state === "active"
+          ? "rounded-full border-2 border-accent animate-pulse"
+          : "border border-border-soft";
+  return <span aria-hidden className={`inline-block h-3 w-3 flex-none ${cls}`} />;
 }
 
 function StatusPill({ status }: { status: ScrapeJob["status"] }) {
   const color =
-    status === "done"
-      ? "text-accent border-accent/40"
-      : status === "error"
-        ? "text-danger border-danger/40"
-        : "text-warn border-warn/40";
-  return (
-    <span
-      className={`font-mono text-[9px] tracking-[0.15em] uppercase border px-1.5 py-0.5 ${color}`}
-    >
-      {status}
-    </span>
-  );
+    status === "done" ? "text-ok" : status === "error" ? "text-danger" : "text-warn";
+  const label = { done: "Done", error: "Failed", running: "Running", queued: "Queued" }[status];
+  return <span className={`text-xs font-semibold ${color}`}>{label}</span>;
 }
 
 function Stat({ n, label }: { n: number; label: string }) {
   return (
-    <div className="border border-border-soft bg-base/40 px-3 py-2">
-      <div className="text-accent text-base">{n}</div>
-      <div className="text-text-muted text-[10px]">{label}</div>
+    <div>
+      <dt className="text-xs text-text-muted">{label}</dt>
+      <dd className="m-0 text-lg font-bold tabular-nums">{n}</dd>
     </div>
   );
 }

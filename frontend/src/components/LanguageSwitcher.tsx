@@ -29,9 +29,9 @@ export function LanguageSwitcher() {
             onClick={() => void i18n.changeLanguage(lng.code)}
             title={lng.name}
             aria-pressed={isActive}
-            className={`font-mono text-[10px] tracking-[0.2em] px-2.5 py-1.5 transition-colors ${
+            className={`px-2 py-1 text-xs font-semibold transition-colors ${
               isActive
-                ? "text-accent bg-accent/10"
+                ? "bg-text text-surface-1"
                 : "text-text-muted hover:text-text"
             }`}
           >

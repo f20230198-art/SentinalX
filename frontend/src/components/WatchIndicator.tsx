@@ -1,31 +1,31 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AnimatePresence, motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 import { api, type HealthFull } from "../lib/api";
 
 /* ----------------------------------------------------------------------- *
- * Persistent header indicator. Polls /healthz/full every 12s and surfaces:
- *   - overall status pill (OK / DEGRADED)
- *   - pipeline pending counts (extraction / llm / mitre)
- *   - hover popover with per-check status + latency
- * Sells the "continuous monitoring" identity without taking real estate.
+ * Header status pill. Polls /healthz/full every 12s.
+ *
+ * Three honest states, not two:
+ *   Live         — database, LLM and Tor all up
+ *   Cached mode  — database up, LLM and/or Tor offline: everything stored is
+ *                  still browsable, only new enrichment/scraping pauses
+ *   Down         — database unreachable (the only fatal case)
  * ----------------------------------------------------------------------- */
 
 const POLL_MS = 12_000;
 
-type CheckMap = HealthFull["checks"];
+type Mode = "live" | "cached" | "down" | "checking";
 
-function pendingTotal(checks: CheckMap | undefined): number {
-  const p = checks?.pipeline;
-  if (!p) return 0;
-  return (
-    Number(p.pending_extraction ?? 0) +
-    Number(p.pending_llm ?? 0) +
-    Number(p.pending_mitre ?? 0)
-  );
+function modeOf(h: HealthFull | undefined, loading: boolean, failed: boolean): Mode {
+  if (loading) return "checking";
+  if (failed || h?.checks.db?.status !== "up") return "down";
+  const optional = [h.checks.ollama, h.checks.tor_socks];
+  return optional.every((c) => c?.status === "up") ? "live" : "cached";
 }
 
 export function WatchIndicator() {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const q = useQuery({
     queryKey: ["healthz", "full"],
@@ -33,126 +33,74 @@ export function WatchIndicator() {
     refetchInterval: POLL_MS,
     refetchOnWindowFocus: true,
   });
+  const mode = modeOf(q.data, q.isLoading, q.isError);
+  const p = q.data?.checks.pipeline;
+  const pending =
+    Number(p?.pending_extraction ?? 0) + Number(p?.pending_llm ?? 0) + Number(p?.pending_mitre ?? 0);
 
-  const checks = q.data?.checks;
-  const overall = q.data?.status ?? (q.isLoading ? "loading" : "down");
-  const pending = pendingTotal(checks);
-  const isOk = overall === "ok";
-
-  const dot = q.isLoading
-    ? "bg-text-muted animate-pulse"
-    : isOk
-    ? "bg-accent shadow-[0_0_6px_var(--color-accent)]"
-    : "bg-danger shadow-[0_0_6px_rgba(229,72,77,0.7)]";
+  const tone = {
+    live: "text-ok border-ok/40",
+    cached: "text-warn border-warn/40",
+    down: "text-danger border-danger/50",
+    checking: "text-text-muted border-border-soft",
+  }[mode];
 
   return (
-    <div
-      className="relative"
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
-    >
+    <div className="relative" onMouseLeave={() => setOpen(false)}>
       <button
-        className="flex items-center gap-2 font-mono text-[10px] tracking-[0.2em] border border-border-soft px-3 py-1.5 hover:border-text-muted transition-colors"
+        onClick={() => setOpen((v) => !v)}
+        onMouseEnter={() => setOpen(true)}
         aria-expanded={open}
+        aria-controls="watch-popover"
+        className={`flex items-center gap-2 border px-2.5 py-1 text-xs font-semibold ${tone}`}
       >
-        <span className={`inline-block w-1.5 h-1.5 rounded-full ${dot}`} />
-        <span className={isOk ? "text-text" : "text-danger"}>
-          {q.isLoading
-            ? "BOOTING"
-            : isOk
-            ? pending > 0
-              ? "PROCESSING"
-              : "IDLE"
-            : "DEGRADED"}
-        </span>
-        {pending > 0 && (
-          <span className="text-text-muted tabular-nums">· {pending} q</span>
-        )}
+        <span
+          aria-hidden
+          className={`inline-block h-2 w-2 rounded-full ${
+            mode === "live" ? "bg-current" : mode === "down" ? "rounded-none bg-current" : "border-2 border-current"
+          }`}
+        />
+        {t(`watch.${mode}`)}
+        {pending > 0 && <span className="font-normal tabular-nums text-text-muted">· {pending} queued</span>}
       </button>
 
-      <AnimatePresence>
-        {open && (
-          <motion.div
-            initial={{ opacity: 0, y: -4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -4 }}
-            transition={{ duration: 0.15 }}
-            className="absolute right-0 top-full mt-2 w-72 z-50 border border-border-soft bg-base/95 backdrop-blur-md p-3 font-mono text-[11px]"
-          >
-            <Row label="db" check={checks?.db} />
-            <Row label="ollama" check={checks?.ollama} />
-            <Row label="tor" check={checks?.tor_socks} />
-            <div className="my-2 border-t border-border-soft/60" />
-            <PipelineRow
-              label="extraction"
-              n={Number(checks?.pipeline?.pending_extraction ?? 0)}
-            />
-            <PipelineRow
-              label="llm"
-              n={Number(checks?.pipeline?.pending_llm ?? 0)}
-            />
-            <PipelineRow
-              label="mitre"
-              n={Number(checks?.pipeline?.pending_mitre ?? 0)}
-            />
-            <div className="mt-2 text-[9px] text-text-muted opacity-70">
-              polled every {POLL_MS / 1000}s
+      {open && (
+        <div
+          id="watch-popover"
+          role="dialog"
+          aria-label={t("watch.detail")}
+          className="absolute right-0 top-full z-50 mt-2 w-80 border border-text bg-surface-1 p-4 text-sm shadow-[0_8px_24px_rgba(0,0,0,0.5)]"
+        >
+          <p className="m-0 mb-3 text-xs leading-relaxed text-text-muted">{t(`watch.explain.${mode}`)}</p>
+          <dl className="m-0">
+            {(
+              [
+                ["db", t("home.svcDb")],
+                ["ollama", t("home.svcLlm")],
+                ["tor_socks", t("home.svcTor")],
+              ] as const
+            ).map(([k, label]) => {
+              const c = q.data?.checks[k];
+              const up = c?.status === "up";
+              return (
+                <div key={k} className="flex items-baseline justify-between border-t border-border-soft py-1.5">
+                  <dt>{label}</dt>
+                  <dd className={`m-0 font-semibold ${up ? "text-ok" : k === "db" ? "text-danger" : "text-warn"}`}>
+                    {up ? `${t("common.online")} · ${c?.latency_ms ?? "–"} ms` : k === "db" ? t("common.down") : t("watch.offline")}
+                  </dd>
+                </div>
+              );
+            })}
+            <div className="flex items-baseline justify-between border-t border-border-soft py-1.5">
+              <dt>{t("home.svcQueue")}</dt>
+              <dd className="m-0 tabular-nums text-text-muted">
+                {pending === 0 ? t("home.state.idle") : `${pending} ${t("watch.pending")}`}
+              </dd>
             </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
-  );
-}
-
-function Row({
-  label,
-  check,
-}: {
-  label: string;
-  check: CheckMap[string] | undefined;
-}) {
-  const up = check?.status === "up";
-  return (
-    <div className="flex items-baseline gap-2 py-0.5">
-      <span
-        className={`inline-block w-1.5 h-1.5 rounded-full ${
-          up ? "bg-accent" : "bg-danger"
-        }`}
-      />
-      <span className="text-text-muted uppercase tracking-[0.15em] text-[9px]">
-        {label}
-      </span>
-      <span className={`ml-auto ${up ? "text-text" : "text-danger"}`}>
-        {check?.status?.toUpperCase() ?? "—"}
-      </span>
-      {check?.latency_ms !== undefined && (
-        <span className="text-text-muted tabular-nums text-[9px]">
-          {check.latency_ms}ms
-        </span>
+          </dl>
+          <p className="m-0 mt-2 text-xs text-text-muted">{t("watch.polled", { s: POLL_MS / 1000 })}</p>
+        </div>
       )}
-    </div>
-  );
-}
-
-function PipelineRow({ label, n }: { label: string; n: number }) {
-  return (
-    <div className="flex items-baseline gap-2 py-0.5">
-      <span
-        className={`inline-block w-1.5 h-1.5 rounded-full ${
-          n === 0 ? "bg-accent/50" : "bg-warn animate-pulse"
-        }`}
-      />
-      <span className="text-text-muted uppercase tracking-[0.15em] text-[9px]">
-        {label}
-      </span>
-      <span className="ml-auto tabular-nums">
-        {n === 0 ? (
-          <span className="text-text-muted">idle</span>
-        ) : (
-          <span className="text-warn">{n} pending</span>
-        )}
-      </span>
     </div>
   );
 }

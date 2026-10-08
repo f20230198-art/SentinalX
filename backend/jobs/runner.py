@@ -89,8 +89,13 @@ def run_job(
     proxy: str = "socks5://127.0.0.1:9051",
     ollama_url: str = "http://127.0.0.1:11434",
     skip_llm: bool = False,
+    urls: list[str] | None = None,
 ) -> None:
     """Run the full pipeline for one .onion URL. Designed to run in a thread.
+
+    `urls` switches the scrape step to *pages mode*: instead of crawling one
+    SilkVault-structured forum, each URL (typically chosen from a discovery
+    search) is fetched once and read with the generic page reader.
 
     `skip_llm` forces the LLM enrichment stage to be skipped — the "fast mode"
     used for a live demo on battery, where Mistral is too slow to wait for.
@@ -105,7 +110,7 @@ def run_job(
     conn = store.conn
     try:
         _run_stages(conn, store, job_id, onion_url, source, proxy, ollama_url,
-                    skip_llm)
+                    skip_llm, urls)
     except Exception as e:  # noqa: BLE001 — top-level guard for the worker thread
         log.exception("job %d failed", job_id)
         _update(conn, job_id, status="error", stage="error",
@@ -123,21 +128,26 @@ def _run_stages(
     proxy: str,
     ollama_url: str,
     skip_llm: bool,
+    urls: list[str] | None = None,
 ) -> None:
     # --- Step 1: scrape (HTML) ---------------------------------------- #
-    _update(conn, job_id, status="running", stage="scraping",
-            message=f"crawling {onion_url}")
-    log.info("job %d: scraping %s", job_id, onion_url)
+    if urls:
+        inserted, duplicates, page_sources = _read_pages(conn, store, job_id, urls, proxy)
+    else:
+        _update(conn, job_id, status="running", stage="scraping",
+                message=f"crawling {onion_url}")
+        log.info("job %d: scraping %s", job_id, onion_url)
 
-    from backend.scraper.html_client import HtmlForumClient
+        from backend.scraper.html_client import HtmlForumClient
 
-    with HtmlForumClient(onion_url, proxy=proxy) as client:
-        # Per-source cursor: re-scraping this forum isn't held back by other
-        # forums' newer posts. Only genuinely-new posts on THIS forum count.
-        crawl = client.crawl(since=store.get_cursor(source=source), source=source)
-    if crawl.errors:
-        log.warning("job %d: crawl had %d error(s)", job_id, len(crawl.errors))
-    inserted, duplicates = store.insert_posts(crawl.posts, source=source)
+        with HtmlForumClient(onion_url, proxy=proxy) as client:
+            # Per-source cursor: re-scraping this forum isn't held back by other
+            # forums' newer posts. Only genuinely-new posts on THIS forum count.
+            crawl = client.crawl(since=store.get_cursor(source=source), source=source)
+        if crawl.errors:
+            log.warning("job %d: crawl had %d error(s)", job_id, len(crawl.errors))
+        inserted, duplicates = store.insert_posts(crawl.posts, source=source)
+        page_sources = [source]
     _update(conn, job_id, posts_scraped=inserted,
             message=f"scraped {inserted} new posts "
                     f"({duplicates} already seen)")
@@ -147,12 +157,13 @@ def _run_stages(
     # left posts un-enriched (interrupted run, Ollama was down, etc.). Drain
     # any pending pipeline work rather than bailing — the stages are idempotent
     # and no-op when there's genuinely nothing to do.
+    src_in = ",".join("?" for _ in page_sources)
     pending = conn.execute(
-        "SELECT COUNT(*) FROM raw_posts WHERE source = ? AND ("
+        f"SELECT COUNT(*) FROM raw_posts WHERE source IN ({src_in}) AND ("
         "  processed_at IS NULL"
         "  OR NOT EXISTS (SELECT 1 FROM post_processing_state pps "
         "     WHERE pps.raw_post_id = raw_posts.id AND pps.stage = 'mitre'))",
-        (source,),
+        page_sources,
     ).fetchone()[0]
     if inserted == 0 and pending == 0:
         _update(conn, job_id, status="done", stage="done",
@@ -174,8 +185,8 @@ def _run_stages(
     ioc = IOCExtractor()
     extract_run_once(store, ioc, ent, batch=200)
     extracted = conn.execute(
-        "SELECT COUNT(*) FROM raw_posts WHERE source = ? AND processed_at IS NOT NULL",
-        (source,),
+        f"SELECT COUNT(*) FROM raw_posts WHERE source IN ({src_in}) AND processed_at IS NOT NULL",
+        page_sources,
     ).fetchone()[0]
     _update(conn, job_id, posts_extracted=extracted,
             message=f"extracted IOCs from {extracted} posts")
@@ -206,14 +217,14 @@ def _run_stages(
     )
     mapped = conn.execute(
         "SELECT COUNT(*) FROM post_techniques pt "
-        "JOIN raw_posts rp ON rp.id = pt.raw_post_id WHERE rp.source = ?",
-        (source,),
+        f"JOIN raw_posts rp ON rp.id = pt.raw_post_id WHERE rp.source IN ({src_in})",
+        page_sources,
     ).fetchone()[0]
     _update(conn, job_id, techniques_mapped=mapped)
 
     # --- done -------------------------------------------------------- #
     total_posts = conn.execute(
-        "SELECT COUNT(*) FROM raw_posts WHERE source = ?", (source,)
+        f"SELECT COUNT(*) FROM raw_posts WHERE source IN ({src_in})", page_sources
     ).fetchone()[0]
     head = (f"done — {inserted} new posts scraped" if inserted
             else "done — resumed; no new posts")
@@ -228,6 +239,48 @@ def _run_stages(
     _update(conn, job_id, status="done", stage="done",
             message=note, finished_at=time.time())
     log.info("job %d: %s", job_id, note)
+
+
+def _read_pages(
+    conn: sqlite3.Connection, store: Store, job_id: int, urls: list[str], proxy: str,
+) -> tuple[int, int, list[str]]:
+    """Pages mode: fetch each URL over Tor and read it generically.
+
+    Each page is its own source (its .onion host), so per-forum provenance and
+    the composite (source, post id) identity still hold. One unreachable page
+    never fails the job; failures are counted and reported in the message.
+    """
+    import httpx
+
+    from backend.discovery.page_reader import read_page
+
+    _update(conn, job_id, status="running", stage="scraping",
+            message=f"reading {len(urls)} discovered pages over Tor")
+    posts, failed = [], 0
+    timeout = httpx.Timeout(connect=30.0, read=60.0, write=30.0, pool=60.0)
+    with httpx.Client(proxy=proxy, timeout=timeout, follow_redirects=True,
+                      headers={"User-Agent": "Mozilla/5.0"}) as client:
+        for i, url in enumerate(urls, 1):
+            try:
+                r = client.get(url if "://" in url else f"http://{url}")
+                r.raise_for_status()
+                post = read_page(r.text, url)
+                if post:
+                    posts.append(post)
+                else:
+                    failed += 1
+            except httpx.HTTPError as e:
+                log.warning("job %d: page %s failed: %s", job_id, url, e)
+                failed += 1
+            _update(conn, job_id, message=f"read {i}/{len(urls)} pages ({failed} unreadable)")
+    inserted = duplicates = 0
+    for p in posts:  # one source per page host
+        ins, dup = store.insert_posts([p], source=p["source"])
+        inserted += ins
+        duplicates += dup
+    _update(conn, job_id, posts_scraped=inserted,
+            message=f"read {len(posts)} pages: {inserted} new, {duplicates} already seen, {failed} unreadable")
+    return inserted, duplicates, sorted({p["source"] for p in posts}) or ["__none__"]
 
 
 def _try_llm(

@@ -1,0 +1,12 @@
+# Slim dependency set for the HOSTED API only (Dockerfile.api / Render).
+#
+# The API serves an already-enriched DB: it reads tables and renders PDFs. It
+# never runs spaCy, MiniLM, or argostranslate, so torch & co. (~2 GB) are left
+# out. Scrape jobs need the full pipeline and are a local-laptop feature.
+
+httpx[socks]==0.27.2
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic>=2,<3
+weasyprint==62.3
+pydyf<0.11

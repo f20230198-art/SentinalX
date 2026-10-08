@@ -29,8 +29,8 @@ export function CitationText({
           <button
             key={i}
             onClick={() => onSelect(p.id)}
-            className="inline-flex items-baseline mx-0.5 px-1 py-px font-mono text-[11px] text-accent border border-accent/40 hover:bg-accent/15 hover:border-accent transition-colors leading-none align-baseline"
-            title={`open post #${p.id}`}
+            className="mx-0.5 inline-flex items-baseline border-b-2 border-accent/60 px-0.5 align-baseline font-mono text-[0.85em] font-semibold leading-none text-accent hover:bg-accent hover:text-surface-1"
+            title={`Open cited post #${p.id}`}
           >
             #{p.id}
           </button>

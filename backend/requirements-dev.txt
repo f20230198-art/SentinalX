@@ -1,0 +1,8 @@
+# Test dependencies. The suite needs no Ollama, Tor, or embedding model:
+# extraction, matching math, schemas and the API are tested in isolation,
+# so torch / sentence-transformers are not required here.
+-r requirements-api.txt
+spacy==3.7.5
+tldextract==5.4.0
+numpy==1.26.4
+pytest==9.1.1

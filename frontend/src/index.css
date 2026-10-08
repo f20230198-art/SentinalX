@@ -1,63 +1,60 @@
 @import "tailwindcss";
 
 /*
- * SentinelX design tokens. Tailwind v4 reads @theme blocks and emits utility
- * classes for every entry — `bg-base`, `text-accent`, etc.
+ * SentinelX design tokens — Swiss / evidence-register world.
+ *
+ * Tailwind v4 reads @theme and emits utilities (`bg-base`, `text-accent`, …).
+ * Token NAMES are kept from the previous theme so every page restyles from
+ * here; only the values changed. Colour strategy: restrained — cool paper
+ * neutrals, ink, and one signal red that marks what matters or can be acted
+ * on. Amber is reserved for "degraded / needs attention", never decoration.
+ * Light, because the use scene is a lit office desk and screen-share demos.
  */
 @theme {
-  --color-base: #0a0612;
-  --color-deep: #13033b;
-  --color-surface-1: #130927;
-  --color-surface-2: #1c1035;
-  --color-border-soft: #2a1f45;
+  /* Dark field green. One hue family for every surface; contrast comes from
+   * lightness steps, not borders-and-glows. Text is a warm off-white, the
+   * signal is a coral red that stays legible on green. */
+  --color-base: #0b1612;          /* page ground: deep field green */
+  --color-deep: #08110e;
+  --color-surface-1: #11211b;     /* sheets / panels */
+  --color-surface-2: #172b23;     /* quiet fills, table stripes */
+  --color-border-soft: #2a4136;   /* hairline rules */
+  --color-rule: #dfe8e1;          /* heavy register rules */
 
-  --color-text: #f4f2fb;
-  --color-text-muted: #a8a0c4;
+  --color-text: #e6ede7;          /* off-white ink */
+  --color-text-muted: #9db2a6;    /* ~7:1 on surface-1 */
 
-  --color-accent: #a78bfa;
-  --color-accent-strong: #7c3aed;
-  --color-warn: #e8a33d;
-  --color-danger: #e5484d;
+  --color-accent: #ff6a5c;        /* signal coral: marks, actions, active */
+  --color-accent-strong: #ff8a7e;
+  --color-info: #79b0ff;          /* semantic-match provenance, links in data */
+  --color-warn: #e9b04f;          /* degraded / cached mode */
+  --color-danger: #ff7a6e;
+  --color-ok: #5fd39a;
 
-  --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
+  --font-display: "Public Sans Variable", "Public Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Public Sans Variable", "Public Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
 }
 
 html {
   background: var(--color-base);
+  color-scheme: dark;
 }
 body {
-  background: transparent;
+  background: var(--color-base);
   color: var(--color-text);
   font-family: var(--font-sans);
-  font-feature-settings: "ss01", "cv11";
+  font-size: 15px;
+  line-height: 1.5;
+  font-feature-settings: "tnum" 0;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
 
-/* Tailwind v4 doesn't reset heading colours — they inherit. Make sure they
- * always start from --color-text so a missing utility never makes them go
- * black on the dark backdrop. */
 h1, h2, h3, h4, h5, h6 {
   color: var(--color-text);
-}
-
-/* Soft dim veil between the WebGL shader and page content. Keeps the violet
- * plasma visible but gives long-form text a darker substrate for contrast. */
-.grain::after {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  background:
-    radial-gradient(
-      ellipse at 50% 30%,
-      rgba(10, 6, 18, 0.55) 0%,
-      rgba(10, 6, 18, 0.78) 60%,
-      rgba(10, 6, 18, 0.92) 100%
-    );
+  text-wrap: balance;
+  letter-spacing: -0.02em;
 }
 
 #root {
@@ -66,146 +63,96 @@ h1, h2, h3, h4, h5, h6 {
   isolation: isolate;
 }
 
-/* Hero gradient — radial wash of #13033b fading to base. Used inside the
- * boot sequence (where it should be opaque) and inside the dashboard hero
- * (where it sits over the WebGL background and should let some shader
- * through). The :where() selector targets the dashboard variant only. */
-.hero-gradient {
-  background:
-    radial-gradient(
-      ellipse 80% 60% at 30% 0%,
-      rgba(19, 3, 59, 0.85) 0%,
-      rgba(19, 3, 59, 0.35) 35%,
-      var(--color-base) 75%
-    );
-}
-:where(main) .hero-gradient {
-  background:
-    radial-gradient(
-      ellipse 80% 60% at 30% 0%,
-      rgba(19, 3, 59, 0.55) 0%,
-      rgba(19, 3, 59, 0.18) 40%,
-      transparent 80%
-    );
+/* ---- Browser surfaces, themed from the palette ---------------------- */
+
+::selection {
+  background: var(--color-accent);
+  color: var(--color-base);
 }
 
-/* Site-wide grain. Fixed-position SVG noise rendered as a CSS data URI so we
- * don't ship a separate file. 4% opacity + screen blend feels like dust on
- * the screen rather than visual noise. */
-.grain::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: 1;
-  pointer-events: none;
-  opacity: 0.04;
-  mix-blend-mode: screen;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+/* Inputs show focus by their border too, never by nothing. */
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline-offset: 0;
 }
 
-/* Scanline overlay for CRT mode. Body gets `data-crt="on"` from the toggle. */
-body[data-crt="on"]::after {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: 2;
-  pointer-events: none;
-  background: repeating-linear-gradient(
-    to bottom,
-    rgba(167, 139, 250, 0.06) 0px,
-    rgba(167, 139, 250, 0.06) 1px,
-    transparent 1px,
-    transparent 3px
-  );
-  mix-blend-mode: overlay;
+a {
+  text-underline-offset: 3px;
 }
 
-body[data-crt="on"] {
-  text-shadow: 0 0 1px rgba(167, 139, 250, 0.3);
-}
-
-/* Cursor halo — soft violet glow that follows the cursor. The CSS vars are
- * updated from useCursorHalo() on mousemove. */
-.cursor-halo::before {
-  content: "";
-  position: fixed;
-  left: var(--mx, 50%);
-  top: var(--my, 50%);
-  width: 480px;
-  height: 480px;
-  transform: translate(-50%, -50%);
-  border-radius: 50%;
-  pointer-events: none;
-  z-index: 0;
-  background: radial-gradient(
-    circle,
-    rgba(167, 139, 250, 0.08) 0%,
-    rgba(167, 139, 250, 0) 60%
-  );
-  transition: opacity 0.3s ease;
-}
-
-/* Hairline divider with mono labels — the Avinyr [03] // SECTION look. */
-.section-divider {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  letter-spacing: 0.15em;
-  text-transform: uppercase;
-  color: var(--color-text-muted);
-}
-.section-divider hr {
-  flex: 1;
-  border: 0;
-  height: 1px;
-  background: linear-gradient(
-    to right,
-    rgba(167, 139, 250, 0.45) 0%,
-    var(--color-border-soft) 60%,
-    transparent 100%
-  );
-}
-
-/* Scramble-on-reveal char — useScramble() swaps innerText through random
- * chars; this just locks the layout box so the swap doesn't reflow. */
-.scramble {
+/* Numbers in data line up. */
+table, .tabular, time {
   font-variant-numeric: tabular-nums;
 }
 
-/* TV-static noise — used in the boot sequence's first phase. Animated by
- * sliding the same SVG noise pattern at high frequency. */
-.noise-static {
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='1.4' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)' opacity='0.65'/></svg>");
-  background-size: 200px 200px;
-  animation: static-shift 0.12s steps(4) infinite;
-  opacity: 0.55;
-}
-@keyframes static-shift {
-  0% { background-position: 0 0; }
-  25% { background-position: 80px -40px; }
-  50% { background-position: -40px 70px; }
-  75% { background-position: 60px 30px; }
-  100% { background-position: -20px -50px; }
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-soft) transparent;
 }
 
-/* Faint violet grid overlay — boot phase 2/3 backdrop. */
-.grid-overlay {
-  background-image:
-    linear-gradient(to right, rgba(167, 139, 250, 0.06) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(167, 139, 250, 0.06) 1px, transparent 1px);
-  background-size: 40px 40px;
-  mask-image: radial-gradient(ellipse at center, black 30%, transparent 75%);
-  -webkit-mask-image: radial-gradient(ellipse at center, black 30%, transparent 75%);
+/* ---- Register section heading ---------------------------------------
+ * Swiss rule: a heavy ink rule above, the title flush left, metadata flush
+ * right. No section numbers, no eyebrow. */
+.section-divider {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  border-top: 2px solid var(--color-rule);
+  padding-top: 0.75rem;
+}
+.section-divider h2 {
+  font-size: 1.125rem;
+  font-weight: 700;
+  margin: 0;
+}
+.section-divider .meta {
+  margin-left: auto;
+  font-size: 0.8125rem;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
 }
 
-/* Skip the boot-sequence entry animation if user prefers reduced motion. */
+/* Hatched fill = "semantic match" provenance. Pattern, not just colour, so
+ * the three provenance kinds read in greyscale and for colour-blind users. */
+.hatch-info {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    var(--color-info) 0 2px,
+    transparent 2px 5px
+  );
+  box-shadow: inset 0 0 0 1px var(--color-info);
+}
+
+/* Quiet indeterminate bar for lazy-loaded routes. */
+.route-loading {
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--color-accent), transparent);
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  animation: route-loading 1s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+@keyframes route-loading {
+  from { background-position: -40% 0; }
+  to { background-position: 140% 0; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* Live arrival in the posts register: the one authored motion moment. */
+@keyframes row-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: none; }
 }

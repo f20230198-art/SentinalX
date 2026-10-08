@@ -1,0 +1,38 @@
+# SentinelX API image — FastAPI + WeasyPrint with its native libraries.
+#
+# Why a Dockerfile: Render's plain Python runtime has no Pango/Cairo/GDK
+# libraries, so WeasyPrint (HTML -> PDF) can't load and /export returns 500.
+# Installing them here makes PDF export work in the hosted deploy.
+#
+# Build + run locally:
+#   docker build -f Dockerfile.api -t sentinelx-api .
+#   docker run -p 8765:8765 sentinelx-api
+
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    SENTINELX_DB_PATH=/app/backend/db/sentinelx.db \
+    PORT=8765
+
+# WeasyPrint's runtime deps (Pango for text layout, HarfBuzz for shaping,
+# fonts so PDFs don't render as boxes).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b libharfbuzz-subset0 \
+      fonts-dejavu-core \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY backend/requirements-api.txt backend/requirements-api.txt
+RUN pip install -r backend/requirements-api.txt
+
+COPY backend/ backend/
+
+# Unprivileged runtime user (it still needs to write the SQLite WAL files).
+RUN useradd --create-home app && chown -R app:app /app
+USER app
+
+EXPOSE 8765
+CMD ["sh", "-c", "exec uvicorn backend.api.main:app --host 0.0.0.0 --port ${PORT}"]

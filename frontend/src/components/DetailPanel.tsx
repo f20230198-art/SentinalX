@@ -1,15 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
 import { Link } from "react-router-dom";
 import { api, type PostDetail, type PostMitigation } from "../lib/api";
-
-export const TECH_COLOR: Record<string, string> = {
-  llm_verified: "rgb(167, 139, 250)",
-  semantic: "rgb(125, 211, 252)",
-  llm_unverified: "rgb(232, 163, 61)",
-};
+import { ProvenanceLegend, ProvenanceMark, QueryError } from "./Evidence";
+import { PROVENANCE, type Provenance } from "../lib/palette";
 
 export function DetailPanel({
   id,
@@ -24,6 +20,13 @@ export function DetailPanel({
     queryFn: () => api.post(id!),
     enabled: id !== null,
   });
+  // Esc closes the panel from anywhere.
+  useEffect(() => {
+    if (id === null) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [id, onClose]);
   return (
     <AnimatePresence>
       {id !== null && (
@@ -32,26 +35,29 @@ export function DetailPanel({
           initial={{ x: "100%" }}
           animate={{ x: 0 }}
           exit={{ x: "100%" }}
-          transition={{ duration: 0.3, ease: [0.4, 0, 0.2, 1] }}
-          className="fixed top-0 right-0 bottom-0 w-[min(560px,100vw)] z-40 border-l border-border-soft bg-base/95 backdrop-blur-md overflow-y-auto"
+          transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
+          role="dialog"
+          aria-label={t("post.title", { id })}
+          className="fixed top-0 right-0 bottom-0 z-40 w-[min(560px,100vw)] overflow-y-auto border-l-2 border-rule bg-surface-1 shadow-[-12px_0_32px_rgba(0,0,0,0.5)]"
         >
           <div className="px-6 py-5">
             <div className="flex items-center justify-between mb-4">
-              <span className="font-mono text-[11px] tracking-[0.2em] text-accent">
+              <span className="font-mono text-sm text-text-muted">
                 {t("post.title", { id })}
               </span>
               <button
                 onClick={onClose}
-                className="font-mono text-xs text-text-muted hover:text-accent border border-border-soft px-2 py-1"
+                className="border border-text px-2.5 py-1 text-sm font-semibold hover:bg-text hover:text-surface-1"
               >
-                [ {t("common.close")} ]
+                {t("common.close")} <span className="font-normal text-text-muted">Esc</span>
               </button>
             </div>
 
             {detail.isLoading && (
-              <div className="font-mono text-xs text-text-muted">
-                {t("common.loading")}
-              </div>
+              <p className="text-sm text-text-muted">{t("common.loading")}</p>
+            )}
+            {detail.isError && (
+              <QueryError what={`post #${id}`} error={detail.error} onRetry={() => detail.refetch()} />
             )}
             {detail.data && <DetailBody d={detail.data} />}
           </div>
@@ -70,16 +76,16 @@ function DetailBody({ d }: { d: PostDetail }) {
   return (
     <div className="space-y-5">
       <header>
-        <div className="font-mono text-[10px] tracking-[0.2em] text-text-muted flex items-center gap-2">
+        <div className="flex items-center gap-2 text-sm text-text-muted">
           <span>
-            {d.post.category.toUpperCase()} · {d.post.author}
+            {d.post.category} · {d.post.author}
           </span>
           {isTranslated && <LanguageBadge lang={d.post.lang} />}
         </div>
         <h2 className="font-display text-xl mt-1 leading-tight">
           {d.post.thread_title}
         </h2>
-        <div className="font-mono text-[10px] text-text-muted mt-1">
+        <div className="font-mono text-xs text-text-muted mt-1">
           {new Date(d.post.source_created_at * 1000)
             .toISOString()
             .replace("T", " ")
@@ -106,17 +112,25 @@ function DetailBody({ d }: { d: PostDetail }) {
           <SectionLabel>
             {t("post.mitreTechniques", { count: d.techniques.length })}
           </SectionLabel>
-          <ul className="space-y-1 font-mono text-xs">
-            {d.techniques.map((t) => (
-              <li key={t.technique_id + t.source} className="flex gap-2">
-                <span
-                  className="inline-block w-1.5 h-1.5 rounded-full mt-1.5"
-                  style={{ backgroundColor: TECH_COLOR[t.source] }}
-                />
-                <span className="text-accent">{t.technique_id}</span>
-                <span className="text-text">{t.name ?? "—"}</span>
-                <span className="ml-auto text-text-muted">
-                  {t.source.replace("llm_", "")}
+          <div className="mb-3">
+            <ProvenanceLegend compact />
+          </div>
+          <ul className="m-0 list-none p-0 text-sm">
+            {d.techniques.map((tq) => (
+              <li
+                key={tq.technique_id + tq.source}
+                className="flex items-center gap-3 border-t border-border-soft py-1.5"
+                title={PROVENANCE[tq.source as Provenance]?.description}
+              >
+                <ProvenanceMark source={tq.source} />
+                <span className="w-20 font-mono">{tq.technique_id}</span>
+                {tq.name ? (
+                  <span className="font-semibold">{tq.name}</span>
+                ) : (
+                  <span className="text-warn">Not in ATT&amp;CK corpus</span>
+                )}
+                <span className="ml-auto text-xs text-text-muted tabular-nums">
+                  {tq.score != null ? `cos ${tq.score.toFixed(2)}` : PROVENANCE[tq.source as Provenance]?.short}
                 </span>
               </li>
             ))}
@@ -129,7 +143,7 @@ function DetailBody({ d }: { d: PostDetail }) {
           <SectionLabel>
             {t("post.defensiveRecommendations", { count: d.mitigations.length })}
           </SectionLabel>
-          <p className="font-mono text-[10px] text-text-muted mb-2 leading-relaxed">
+          <p className="font-mono text-xs text-text-muted mb-2 leading-relaxed">
             {t("post.mitigationsNote")}
           </p>
           <ul className="space-y-2">
@@ -196,11 +210,10 @@ function LanguageBadge({ lang }: { lang: string | null }) {
   const languageName = useLanguageName();
   return (
     <span
-      className="inline-flex items-center gap-1 border border-accent/40 text-accent px-1.5 py-0.5 text-[9px] tracking-[0.15em]"
+      className="inline-flex items-center gap-1 border border-accent/40 text-accent px-1.5 py-0.5 text-xs"
       title={languageName(lang)}
     >
-      <span>⇄</span>
-      <span>{(lang ?? "??").toUpperCase()} → EN</span>
+      <span>Translated {(lang ?? "??").toUpperCase()}–EN</span>
     </span>
   );
 }
@@ -228,7 +241,7 @@ function PostBody({
     return (
       <section>
         <SectionLabel>{t("post.body")}</SectionLabel>
-        <pre className="font-mono text-xs whitespace-pre-wrap leading-relaxed text-text/90 bg-surface-1/40 border border-border-soft p-3">
+        <pre className="m-0 whitespace-pre-wrap border border-border-soft bg-surface-2 p-3 font-sans text-sm leading-relaxed text-text">
           {body}
         </pre>
       </section>
@@ -246,17 +259,17 @@ function PostBody({
         </SectionLabel>
         <button
           onClick={() => setShowOriginal((v) => !v)}
-          className="font-mono text-[10px] text-text-muted hover:text-accent border border-border-soft px-2 py-0.5"
+          className="font-mono text-xs text-text-muted hover:text-accent border border-border-soft px-2 py-0.5"
         >
           {showOriginal ? t("post.showTranslation") : t("post.showOriginal")}
         </button>
       </div>
       {!showOriginal && (
-        <p className="font-mono text-[10px] text-text-muted mb-2 leading-relaxed">
+        <p className="font-mono text-xs text-text-muted mb-2 leading-relaxed">
           {t("post.translatedNote", { language: languageName(lang) })}
         </p>
       )}
-      <pre className="font-mono text-xs whitespace-pre-wrap leading-relaxed text-text/90 bg-surface-1/40 border border-border-soft p-3">
+      <pre className="m-0 whitespace-pre-wrap border border-border-soft bg-surface-2 p-3 font-sans text-sm leading-relaxed text-text">
         {displayed}
       </pre>
     </section>
@@ -267,16 +280,16 @@ function MitigationItem({ m }: { m: PostMitigation }) {
   return (
     <li className="border border-border-soft bg-surface-1/30 px-3 py-2">
       <div className="flex items-baseline gap-2 font-mono text-xs">
-        <span className="text-emerald-400">{m.mitigation_id}</span>
-        <span className="text-text">{m.name}</span>
+        <span className="font-mono text-ok">{m.mitigation_id}</span>
+        <span className="font-semibold text-text">{m.name}</span>
         <span
-          className="ml-auto text-[10px] text-text-muted"
+          className="ml-auto text-xs text-text-muted"
           title={`counters ${m.addresses.join(", ")}`}
         >
           {m.addresses.join(" ")}
         </span>
       </div>
-      <p className="text-[11px] leading-relaxed text-text-muted mt-1 line-clamp-3">
+      <p className="text-xs leading-relaxed text-text-muted mt-1 line-clamp-3">
         {m.description}
       </p>
       {m.url && (
@@ -284,9 +297,9 @@ function MitigationItem({ m }: { m: PostMitigation }) {
           href={m.url}
           target="_blank"
           rel="noreferrer"
-          className="font-mono text-[10px] text-accent hover:underline mt-1 inline-block"
+          className="font-mono text-xs text-accent hover:underline mt-1 inline-block"
         >
-          attack.mitre.org ↗
+          attack.mitre.org
         </a>
       )}
     </li>
@@ -295,8 +308,8 @@ function MitigationItem({ m }: { m: PostMitigation }) {
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div className="font-mono text-[10px] tracking-[0.2em] text-text-muted mb-2">
+    <h3 className="m-0 mb-2 border-t-2 border-rule pt-2 text-sm font-bold">
       {children}
-    </div>
+    </h3>
   );
 }

@@ -48,7 +48,7 @@ def poll_once(store: Store, client: ForumClient, batch_limit: int = 1000) -> tup
 
     Returns (fetched, inserted, duplicates).
     """
-    cursor_before = store.get_cursor()
+    cursor_before = store.get_cursor(source="darkbay")
     log.info("polling /api/posts since=%s", cursor_before)
 
     with store.run(cursor_before) as h:
@@ -65,7 +65,7 @@ def poll_once(store: Store, client: ForumClient, batch_limit: int = 1000) -> tup
         inserted, duplicates = store.insert_posts(posts)
         h.inserted = inserted
         h.duplicates = duplicates
-        h.cursor_after = store.get_cursor()
+        h.cursor_after = store.get_cursor(source="darkbay")
 
         log.info(
             "fetched=%d inserted=%d duplicates=%d cursor=%s -> %s total_rows=%d",
@@ -84,7 +84,9 @@ def poll_html_once(
     every inserted row so the DB knows which forum the post came from.
     Returns (fetched, inserted, duplicates).
     """
-    cursor_before = store.get_cursor()
+    # Per-source cursor: a SilkVault crawl must not be held back by DarkBay's
+    # (or any other forum's) newer timestamps. Matches jobs/runner.py.
+    cursor_before = store.get_cursor(source=source)
     log.info("HTML crawl of %s since=%s", client.host, cursor_before)
 
     with store.run(cursor_before) as h:
@@ -104,7 +106,7 @@ def poll_html_once(
         inserted, duplicates = store.insert_posts(crawl.posts, source=source)
         h.inserted = inserted
         h.duplicates = duplicates
-        h.cursor_after = store.get_cursor()
+        h.cursor_after = store.get_cursor(source=source)
 
         log.info(
             "crawled listings=%d pages=%d fetched=%d inserted=%d duplicates=%d "

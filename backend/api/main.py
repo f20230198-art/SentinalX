@@ -21,10 +21,13 @@ from pathlib import Path
 from typing import Any
 
 import asyncio
+import time as _time
+from collections import defaultdict, deque
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, StreamingResponse
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from backend.api import investigations as inv
 from backend.llm.lenses import LENSES, list_lenses
@@ -75,6 +78,48 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="SentinelX I", version="0.6.5", lifespan=lifespan)
+
+# --------------------------------------------------------------------------- #
+# Write protection: optional API key + per-IP rate limit.
+#
+# Reads stay open (it's a dashboard). Anything that writes or burns compute —
+# creating investigations, LLM reruns, scrape jobs that open Tor circuits —
+# is gated:
+#   * API key: if SENTINELX_API_KEY is set, mutating requests must send it in
+#     the X-API-Key header. Unset (local demo) = no check, behaviour unchanged.
+#   * Rate limit: a sliding-window counter per client IP on the expensive
+#     endpoints, so one client can't queue 100 LLM reruns or Tor crawls.
+#     In-memory and per-process — fine for a single uvicorn worker; a
+#     multi-worker deploy would move this to Redis.
+# --------------------------------------------------------------------------- #
+
+API_KEY = os.environ.get("SENTINELX_API_KEY", "").strip()
+RATE_LIMIT = int(os.environ.get("SENTINELX_RATE_LIMIT", "10"))   # requests …
+RATE_WINDOW_S = 60.0                                                # … per minute
+_EXPENSIVE = ("/scrape-jobs", "/rerun", "/discover/search")
+_hits: dict[str, deque[float]] = defaultdict(deque)
+
+
+@app.middleware("http")
+async def protect_writes(request: Request, call_next):
+    if request.method in ("POST", "PATCH", "DELETE"):
+        if API_KEY and request.headers.get("x-api-key") != API_KEY:
+            return JSONResponse({"detail": "missing or invalid X-API-Key"}, status_code=401)
+        if any(request.url.path.endswith(p) for p in _EXPENSIVE):
+            ip = request.client.host if request.client else "unknown"
+            now = _time.monotonic()
+            q = _hits[ip]
+            while q and now - q[0] > RATE_WINDOW_S:
+                q.popleft()
+            if len(q) >= RATE_LIMIT:
+                return JSONResponse(
+                    {"detail": f"rate limit: {RATE_LIMIT} per {int(RATE_WINDOW_S)}s"},
+                    status_code=429,
+                    headers={"Retry-After": str(int(RATE_WINDOW_S - (now - q[0])) + 1)},
+                )
+            q.append(now)
+    return await call_next(request)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -192,7 +237,13 @@ def stats() -> dict[str, Any]:
             "SELECT COUNT(*) FROM raw_posts WHERE body_en IS NOT NULL"
         ),
         "top_techniques": rows(
-            "SELECT pt.technique_id, mt.name, COUNT(*) AS n FROM post_techniques pt "
+            # Per-provenance split so the dashboard can show WHY each technique
+            # is on the list (verified vs semantic vs unverified), not just how often.
+            "SELECT pt.technique_id, mt.name, COUNT(*) AS n, "
+            "  SUM(pt.source = 'llm_verified') AS verified, "
+            "  SUM(pt.source = 'semantic') AS semantic, "
+            "  SUM(pt.source = 'llm_unverified') AS unverified "
+            "FROM post_techniques pt "
             "LEFT JOIN mitre_techniques mt ON mt.technique_id = pt.technique_id "
             "GROUP BY pt.technique_id ORDER BY n DESC LIMIT 15"
         ),
@@ -590,9 +641,28 @@ def create_scrape_job(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
 
     from backend.jobs import runner
 
+    # Pages mode: a list of discovered page URLs (from /discover/search).
+    urls = [str(u).strip() for u in (payload.get("urls") or []) if str(u).strip()]
+    if urls:
+        bad = [u for u in urls if not urlparse(u if "://" in u else f"http://{u}").netloc.endswith(".onion")]
+        if bad:
+            raise HTTPException(400, f"every url must be a .onion page (got {bad[0]!r})")
+        if len(urls) > 25:
+            raise HTTPException(400, "send at most 25 pages per job")
+        c = app.state.conn
+        job_id = runner.create_job(c, onion_url=f"{len(urls)} discovered pages", source="discovery")
+        threading.Thread(
+            target=runner.run_job,
+            kwargs={"job_id": job_id, "onion_url": urls[0], "source": "discovery",
+                    "skip_llm": bool(payload.get("skip_llm")), "urls": urls,
+                    "proxy": "socks5://127.0.0.1:9050"},
+            daemon=True, name=f"scrape-job-{job_id}",
+        ).start()
+        return runner.get_job(c, job_id) or {"id": job_id, "status": "queued"}
+
     raw = str(payload.get("onion_url") or "").strip()
     if not raw:
-        raise HTTPException(400, "onion_url is required")
+        raise HTTPException(400, "onion_url or urls is required")
     # Normalise to a comparable host for validation + default source label.
     host = urlparse(raw if "://" in raw else f"http://{raw}").netloc or raw
     if not host.endswith(".onion"):
@@ -618,6 +688,81 @@ def create_scrape_job(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
 
     job = runner.get_job(c, job_id)
     return job or {"id": job_id, "status": "queued"}
+
+
+# --------------------------------------------------------------------------- #
+# Discovery — search before you scrape.
+# --------------------------------------------------------------------------- #
+
+@app.get("/discover/engines")
+def discover_engines() -> dict[str, Any]:
+    from backend.discovery.search import available_engines
+    return {"items": available_engines()}
+
+
+@app.post("/discover/search")
+def discover_search(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    """Search the local index and/or real dark-web engines (over Tor).
+
+    Body: {"query": str, "engines": ["local", "ahmia"]?, "refine": bool?}
+    Engines fail independently; their errors come back in `errors`.
+    """
+    from backend.discovery.search import run_search
+
+    query = str(payload.get("query") or "").strip()
+    if len(query) < 2:
+        raise HTTPException(400, "query must be at least 2 characters")
+    engines = payload.get("engines") or ["local"]
+    return run_search(app.state.conn, query[:300], engines=engines, refine=bool(payload.get("refine")))
+
+
+# --------------------------------------------------------------------------- #
+# Watchlists + alerts
+# --------------------------------------------------------------------------- #
+
+@app.get("/watchlists")
+def get_watchlists() -> dict[str, Any]:
+    from backend.api import watch
+    watch.check_all(app.state.conn)
+    return {"items": watch.list_all(app.state.conn)}
+
+
+@app.post("/watchlists", status_code=201)
+def create_watchlist(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    from backend.api import watch
+    terms = payload.get("terms") or []
+    if isinstance(terms, str):
+        terms = terms.split(",")
+    try:
+        return watch.create(app.state.conn, str(payload.get("name") or ""), terms)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/watchlists/{watchlist_id}")
+def delete_watchlist(watchlist_id: int) -> Response:
+    from backend.api import watch
+    if not watch.delete(app.state.conn, watchlist_id):
+        raise HTTPException(404, f"watchlist {watchlist_id} not found")
+    return Response(status_code=204)
+
+
+@app.get("/alerts")
+def get_alerts(
+    watchlist_id: int | None = None, limit: int = Query(100, ge=1, le=500)
+) -> dict[str, Any]:
+    from backend.api import watch
+    watch.check_all(app.state.conn)
+    items = watch.alerts(app.state.conn, watchlist_id, limit)
+    unseen = app.state.conn.execute("SELECT COUNT(*) FROM watch_hits WHERE seen = 0").fetchone()[0]
+    return {"items": items, "unseen": unseen}
+
+
+@app.post("/alerts/seen")
+def mark_alerts_seen(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+    from backend.api import watch
+    ids = [int(i) for i in (payload or {}).get("ids") or []]
+    return {"updated": watch.mark_seen(app.state.conn, ids or None)}
 
 
 @app.get("/scrape-jobs")
@@ -688,19 +833,38 @@ async def events_stream(request: Request, since_id: int = Query(0, ge=0)):
 
     Frame types:
         event: hello   data: {"latest_id": N}              # on connect
-        event: post    data: {"id": N, ...post snapshot}   # per new post
+        event: post    id: N  data: {"id": N, ...}         # per new post (id enables resume)
         event: ping    data: {"t": <epoch>}                # keepalive every 15s
     """
 
-    async def gen():
+    # Resume support: every post frame carries `id: <post id>`. When the
+    # browser's EventSource reconnects after a drop, it automatically sends
+    # the last id it saw in the Last-Event-ID header — so we resume exactly
+    # after it instead of replaying from the original since_id.
+    header_id = request.headers.get("last-event-id", "")
+    start_after = int(header_id) if header_id.isdigit() else since_id
+
+    def _latest_id() -> int:
         c = app.state.conn
+        return c.execute("SELECT COALESCE(MAX(id), 0) FROM raw_posts").fetchone()[0]
+
+    def _new_posts(after: int) -> list[dict[str, Any]]:
+        c = app.state.conn
+        rows = c.execute(
+            "SELECT id FROM raw_posts WHERE id > ? ORDER BY id ASC LIMIT 50",
+            (after,),
+        ).fetchall()
+        return [_post_event(c, r["id"]) for r in rows]
+
+    async def gen():
+        # sqlite3 calls are blocking. Running them directly inside this async
+        # generator would stall the event loop (and every other request) for
+        # the duration of each query, so they go to the threadpool.
         # since_id == 0 (the default) means "replay everything from the
         # start" — the timeline page uses this to bootstrap. Any positive
         # value is treated as "resume after this id".
-        last = since_id
-        latest = c.execute(
-            "SELECT COALESCE(MAX(id), 0) FROM raw_posts"
-        ).fetchone()[0]
+        last = start_after
+        latest = await run_in_threadpool(_latest_id)
         yield f"event: hello\ndata: {json.dumps({'latest_id': latest})}\n\n"
 
         last_ping = asyncio.get_event_loop().time()
@@ -708,14 +872,9 @@ async def events_stream(request: Request, since_id: int = Query(0, ge=0)):
             if await request.is_disconnected():
                 break
 
-            rows = c.execute(
-                "SELECT id FROM raw_posts WHERE id > ? ORDER BY id ASC LIMIT 50",
-                (last,),
-            ).fetchall()
-            for row in rows:
-                payload = _post_event(c, row["id"])
-                yield f"event: post\ndata: {json.dumps(payload)}\n\n"
-                last = row["id"]
+            for payload in await run_in_threadpool(_new_posts, last):
+                yield f"id: {payload['id']}\nevent: post\ndata: {json.dumps(payload)}\n\n"
+                last = payload["id"]
 
             now = asyncio.get_event_loop().time()
             if now - last_ping > 15:

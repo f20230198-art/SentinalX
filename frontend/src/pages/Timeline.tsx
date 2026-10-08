@@ -1,617 +1,511 @@
-import { useEffect, useMemo, useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { API_BASE, type TimelinePost } from "../lib/api";
 import { SectionDivider } from "../components/Shell";
-import { DetailPanel, TECH_COLOR } from "../components/DetailPanel";
-import { useLivePosts } from "../hooks/useLivePosts";
+import { DetailPanel } from "../components/DetailPanel";
+import { ProvenanceMark } from "../components/Evidence";
+import { intentColor, PROVENANCE, type Provenance } from "../lib/palette";
 
 /* ----------------------------------------------------------------------- *
- * Vertical timecord — Dark-inspired layout.
+ * Posts register — every ingested post, newest first, grouped by day.
  *
- * A single glowing violet thread runs top → bottom down the page. Posts
- * appear as branches off the thread, alternating left ↔ right. Day markers
- * (date pills) float on the spine; within a day, branches are stacked in
- * chronological order. Newest day at the top.
+ * Data: one SSE stream (/events?since_id=0). The server replays history,
+ * then keeps the connection open and pushes new posts as they're ingested;
+ * EventSource reconnects on its own and resumes via Last-Event-ID. Anything
+ * that arrives after the initial replay settles is marked as a live arrival.
  *
- * Behaviour preserved from the previous horizontal version:
- *   - SSE bootstrap (replay everything → switch to live stream).
- *   - Filter chips dim non-matching branches.
- *   - Hover a branch → fan its MITRE techniques out as a halo.
- *   - Click → DetailPanel.
- *   - Live arrival animation: pulsing rings + [NEW] flag on the node.
+ * Layout: a ruled register (id · time · thread · intent · techniques · IOCs)
+ * instead of a decorative spine — scannable, sortable by eye, and every row
+ * opens the post's evidence in the detail panel.
  * ----------------------------------------------------------------------- */
 
-const ROW_H = 110; // vertical space per branch
-const DAY_HEAD_H = 56;
-const SPINE_X_PCT = 50;
-const NODE_R = 7;
-
-const INTENT_COLOR: Record<string, string> = {
-  sale: "rgb(232, 163, 61)",
-  doxxing: "rgb(229, 72, 77)",
-  recruitment: "rgb(125, 211, 252)",
-};
-const intentColor = (intent: string | null) =>
-  (intent && INTENT_COLOR[intent]) || "rgb(167, 139, 250)";
-
-type Filter =
-  | "all"
-  | "sale"
-  | "discussion"
-  | "doxxing"
-  | "recruitment"
-  | "with_cve"
-  | "with_btc";
+type Filter = "all" | "sale" | "discussion" | "doxxing" | "recruitment" | "with_cve" | "with_btc";
 
 const FILTERS: { key: Filter; label: string }[] = [
-  { key: "all", label: "ALL" },
-  { key: "sale", label: "SALE" },
-  { key: "discussion", label: "DISCUSSION" },
-  { key: "doxxing", label: "DOXXING" },
-  { key: "recruitment", label: "RECRUITMENT" },
-  { key: "with_cve", label: "WITH CVE" },
-  { key: "with_btc", label: "WITH BTC" },
+  { key: "all", label: "All" },
+  { key: "sale", label: "Sale" },
+  { key: "discussion", label: "Discussion" },
+  { key: "recruitment", label: "Recruitment" },
+  { key: "doxxing", label: "Doxxing" },
+  { key: "with_cve", label: "Mentions a CVE" },
+  { key: "with_btc", label: "Has a BTC address" },
 ];
 
 function passesFilter(p: TimelinePost, f: Filter): boolean {
   if (f === "all") return true;
-  if (f === "sale" || f === "discussion" || f === "doxxing" || f === "recruitment") {
-    return p.intent === f;
-  }
   if (f === "with_cve") return p.iocs.some((i) => i.ioc_type === "cve");
   if (f === "with_btc") return p.iocs.some((i) => i.ioc_type === "btc");
-  return true;
+  return p.intent === f;
 }
 
-function dayKey(t: number): string {
-  return new Date(t * 1000).toISOString().slice(0, 10);
-}
+const dayKey = (t: number) => new Date(t * 1000).toISOString().slice(0, 10);
+const timeLabel = (t: number) => new Date(t * 1000).toISOString().slice(11, 16);
 function dayLabel(key: string): string {
-  const d = new Date(key + "T00:00:00Z");
-  return d
-    .toLocaleDateString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "2-digit",
-      timeZone: "UTC",
-    })
-    .toUpperCase();
-}
-function timeLabel(t: number): string {
-  return new Date(t * 1000).toISOString().slice(11, 16) + " UTC";
+  return new Date(key + "T00:00:00Z").toLocaleDateString(undefined, {
+    weekday: "short",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  });
 }
 
-interface DayGroup {
-  key: string;
-  posts: TimelinePost[];
-}
-
-function groupByDay(posts: TimelinePost[]): DayGroup[] {
-  const m = new Map<string, TimelinePost[]>();
-  for (const p of posts) {
-    const k = dayKey(p.source_created_at);
-    if (!m.has(k)) m.set(k, []);
-    m.get(k)!.push(p);
-  }
-  // Newest day first, newest post within day first → reads top-down like a feed.
-  const groups = [...m.entries()].map(([key, list]) => ({
-    key,
-    posts: list.sort((a, b) => b.source_created_at - a.source_created_at),
-  }));
-  groups.sort((a, b) => (a.key < b.key ? 1 : -1));
-  return groups;
-}
+const ARRIVAL_MS = 4500;
+const SETTLE_MS = 2500;
 
 export function Timeline() {
   const [selected, setSelected] = useState<number | null>(null);
-  const [hovered, setHovered] = useState<number | null>(null);
-  const [filter, setFilter] = useState<Filter>("all");
-  const [arrivingIds, setArrivingIds] = useState<Set<number>>(new Set());
-
-  const markArriving = (id: number) => {
-    setArrivingIds((prev) => new Set(prev).add(id));
-    window.setTimeout(() => {
-      setArrivingIds((prev) => {
-        if (!prev.has(id)) return prev;
-        const next = new Set(prev);
-        next.delete(id);
-        return next;
-      });
-    }, 4500);
-  };
-
-  const [posts, setPosts] = useState<TimelinePost[]>([]);
+  // Filters live in the URL: views are shareable and survive a refresh.
+  const [params, setParams] = useSearchParams();
+  const filter = (FILTERS.some((f) => f.key === params.get("f")) ? params.get("f") : "all") as Filter;
+  const q = params.get("q") ?? "";
+  const from = params.get("from");
+  const to = params.get("to");
+  const setParam = (patch: Record<string, string | null>) =>
+    setParams((prev) => {
+      const next = new URLSearchParams(prev);
+      for (const [k, v] of Object.entries(patch)) (v ? next.set(k, v) : next.delete(k));
+      return next;
+    }, { replace: true });
+  const setFilter = (f: Filter) => setParam({ f: f === "all" ? null : f });
+  const [cursor, setCursor] = useState(0);
+  const searchRef = useRef<HTMLInputElement | null>(null);
+  const [posts, setPosts] = useState<Map<number, TimelinePost>>(new Map());
   const [historyDone, setHistoryDone] = useState(false);
+  const [arriving, setArriving] = useState<Set<number>>(new Set());
+  const [connected, setConnected] = useState(true);
+  const historyDoneRef = useRef(false);
 
   useEffect(() => {
     const es = new EventSource(`${API_BASE}/events?since_id=0`);
-    let count = 0;
-    let settleTimer: number | undefined;
+    let settle: number | undefined;
     const scheduleSettle = () => {
-      if (settleTimer) window.clearTimeout(settleTimer);
-      settleTimer = window.setTimeout(() => {
-        if (count > 0) setHistoryDone(true);
-      }, 2500);
+      window.clearTimeout(settle);
+      settle = window.setTimeout(() => {
+        historyDoneRef.current = true;
+        setHistoryDone(true);
+      }, SETTLE_MS);
     };
+    scheduleSettle(); // an empty corpus still settles
+
     const onPost = (ev: MessageEvent) => {
+      let p: TimelinePost & { missing?: boolean };
       try {
-        const p = JSON.parse(ev.data) as TimelinePost;
-        if ((p as { missing?: boolean }).missing) return;
-        count++;
-        setPosts((prev) =>
-          prev.some((x) => x.id === p.id) ? prev : [...prev, p],
-        );
-        scheduleSettle();
+        p = JSON.parse(ev.data);
       } catch {
-        /* ignore */
+        return;
+      }
+      if (p.missing) return;
+      setPosts((prev) => (prev.has(p.id) ? prev : new Map(prev).set(p.id, p)));
+      if (historyDoneRef.current) {
+        setArriving((prev) => new Set(prev).add(p.id));
+        window.setTimeout(
+          () => setArriving((prev) => {
+            const next = new Set(prev);
+            next.delete(p.id);
+            return next;
+          }),
+          ARRIVAL_MS,
+        );
+      } else {
+        scheduleSettle();
       }
     };
     es.addEventListener("post", onPost);
+    es.onopen = () => setConnected(true);
+    es.onerror = () => setConnected(es.readyState === EventSource.OPEN);
     return () => {
-      es.removeEventListener("post", onPost);
       es.close();
-      if (settleTimer) window.clearTimeout(settleTimer);
+      window.clearTimeout(settle);
     };
   }, []);
 
-  const liveAfter = historyDone
-    ? Math.max(0, ...posts.map((p) => p.id))
-    : null;
-  const livePosts = useLivePosts(liveAfter);
-
-  useEffect(() => {
-    for (const p of livePosts) {
-      if (!arrivingIds.has(p.id)) markArriving(p.id);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [livePosts]);
-
-  const merged = useMemo(() => {
-    const m = new Map<number, TimelinePost>();
-    for (const p of posts) m.set(p.id, p);
-    for (const p of livePosts) m.set(p.id, p);
-    return [...m.values()];
-  }, [posts, livePosts]);
-
-  const days = useMemo(() => groupByDay(merged), [merged]);
+  const all = useMemo(
+    () => [...posts.values()].sort((a, b) => b.source_created_at - a.source_created_at),
+    [posts],
+  );
 
   const counts = useMemo(() => {
-    const c: Record<Filter, number> = {
-      all: merged.length,
-      sale: 0,
-      discussion: 0,
-      doxxing: 0,
-      recruitment: 0,
-      with_cve: 0,
-      with_btc: 0,
-    };
-    for (const p of merged) {
-      if (p.intent && c[p.intent as Filter] !== undefined) c[p.intent as Filter]++;
-      if (p.iocs.some((i) => i.ioc_type === "cve")) c.with_cve++;
-      if (p.iocs.some((i) => i.ioc_type === "btc")) c.with_btc++;
-    }
+    const c = Object.fromEntries(FILTERS.map((f) => [f.key, 0])) as Record<Filter, number>;
+    for (const p of all) for (const f of FILTERS) if (passesFilter(p, f.key)) c[f.key]++;
     return c;
-  }, [merged]);
+  }, [all]);
 
-  const replayLatest = () => {
-    const newest = merged.reduce(
-      (best, p) => (p.id > (best?.id ?? -1) ? p : best),
-      null as TimelinePost | null,
+  // Everything except the date range: feeds the activity chart, so the chart
+  // always shows where the matches are in time.
+  const matching = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    return all.filter(
+      (p) =>
+        passesFilter(p, filter) &&
+        (!needle ||
+          p.thread_title.toLowerCase().includes(needle) ||
+          (p.summary ?? "").toLowerCase().includes(needle) ||
+          p.body_preview.toLowerCase().includes(needle) ||
+          p.iocs.some((i) => i.value.toLowerCase().includes(needle)) ||
+          p.techniques.some((t) => t.technique_id.toLowerCase() === needle)),
     );
-    if (newest) {
-      markArriving(newest.id);
-      setSelected(newest.id);
+  }, [all, filter, q]);
+
+  const visible = useMemo(
+    () =>
+      matching.filter((p) => {
+        const d = dayKey(p.source_created_at);
+        return (!from || d >= from) && (!to || d <= to);
+      }),
+    [matching, from, to],
+  );
+
+  // j / k / Enter / "/" — keyboard triage through the visible rows.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const typing = (e.target as HTMLElement)?.closest("input, textarea, select");
+      if (e.key === "/" && !typing) {
+        e.preventDefault();
+        searchRef.current?.focus();
+        return;
+      }
+      if (typing || selected !== null) return;
+      if (e.key === "j" || e.key === "k") {
+        e.preventDefault();
+        setCursor((c) => Math.max(0, Math.min(visible.length - 1, c + (e.key === "j" ? 1 : -1))));
+      } else if (e.key === "Enter" && visible[cursor]) {
+        setSelected(visible[cursor].id);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [visible, cursor, selected]);
+  useEffect(() => setCursor(0), [filter, q, from, to]);
+  const cursorId = visible[cursor]?.id;
+  useEffect(() => {
+    if (cursorId !== undefined)
+      document.getElementById(`post-row-${cursorId}`)?.scrollIntoView({ block: "nearest" });
+  }, [cursorId]);
+
+  const days = useMemo(() => {
+    const m = new Map<string, TimelinePost[]>();
+    for (const p of visible) {
+      const k = dayKey(p.source_created_at);
+      if (!m.has(k)) m.set(k, []);
+      m.get(k)!.push(p);
     }
-  };
+    return [...m.entries()];
+  }, [all, filter]);
 
   return (
-    <div className="max-w-[1440px] mx-auto px-8">
+    <div className="mx-auto max-w-[1440px] px-4 pb-24 sm:px-8">
       <SectionDivider
-        index="02"
-        label="Intelligence feed"
-        trailing={
-          historyDone
-            ? `${merged.length} posts · live`
-            : `loading ${merged.length} posts…`
-        }
+        label="Posts"
+        trailing={historyDone ? `${all.length} posts` : `Loading ${all.length} posts…`}
       />
 
-      {/* Filter chips */}
-      <div className="mb-4 flex flex-wrap gap-2 font-mono text-[10px] tracking-[0.18em]">
-        {FILTERS.map((f) => {
-          const n = counts[f.key];
-          const active = filter === f.key;
-          return (
+      <div className="mb-6 flex flex-wrap items-center gap-x-6 gap-y-3">
+        <div role="group" aria-label="Filter posts" className="flex flex-wrap gap-1.5">
+          {FILTERS.map((f) => (
             <button
               key={f.key}
               onClick={() => setFilter(f.key)}
-              className={`px-3 py-1.5 border transition-colors ${
-                active
-                  ? "border-accent text-accent bg-accent/10"
-                  : "border-border-soft text-text-muted hover:text-text hover:border-text-muted"
+              aria-pressed={filter === f.key}
+              className={`border px-2.5 py-1 text-sm font-semibold ${
+                filter === f.key
+                  ? "border-text bg-text text-surface-1"
+                  : "border-border-soft text-text-muted hover:border-text hover:text-text"
               }`}
             >
-              {f.label}{" "}
-              <span className="opacity-60 ml-1 tabular-nums">{n}</span>
+              {f.label}
+              <span className="ml-1.5 font-normal tabular-nums opacity-70">{counts[f.key]}</span>
             </button>
-          );
-        })}
-      </div>
-
-      <ArrivalBanner ids={[...arrivingIds]} merged={merged} />
-
-      {/* Live status pill */}
-      <div className="mb-3 flex items-center justify-end gap-3 font-mono text-[10px] tracking-[0.2em] text-text-muted">
-        <button
-          onClick={replayLatest}
-          disabled={!historyDone || merged.length === 0}
-          className="border border-border-soft px-2 py-1 hover:text-accent hover:border-accent disabled:opacity-30 transition-colors"
-          title="Re-fire the entrance animation on the most recent post"
-        >
-          [ REPLAY LIVE ]
-        </button>
-        <span className="flex items-center gap-2">
-          <span className="inline-block w-1.5 h-1.5 rounded-full bg-accent shadow-[0_0_6px_var(--color-accent)] animate-pulse" />
-          {historyDone ? "LIVE" : "INDEXING"}
-        </span>
-      </div>
-
-      {/* The timecord itself */}
-      <div className="relative">
-        {/* Spine */}
-        <div
-          className="absolute top-0 bottom-0 w-px"
-          style={{
-            left: `${SPINE_X_PCT}%`,
-            background:
-              "linear-gradient(to bottom, transparent 0%, rgba(167,139,250,0.55) 6%, rgba(167,139,250,0.55) 94%, transparent 100%)",
-            boxShadow: "0 0 12px rgba(167,139,250,0.45)",
-          }}
-        />
-        {/* Spine head + tail caps */}
-        <div
-          className="absolute -translate-x-1/2 w-2 h-2 rounded-full bg-accent"
-          style={{
-            left: `${SPINE_X_PCT}%`,
-            top: 0,
-            boxShadow: "0 0 14px rgba(167,139,250,0.9)",
-          }}
-        />
-
-        {/* Shimmer pulse — fires when new intel arrives, races down the spine. */}
-        <AnimatePresence>
-          {arrivingIds.size > 0 && (
-            <motion.div
-              key={[...arrivingIds].join(",")}
-              initial={{ top: 0, opacity: 0 }}
-              animate={{ top: "100%", opacity: [0, 1, 1, 0] }}
-              transition={{ duration: 1.6, ease: "easeOut", times: [0, 0.1, 0.85, 1] }}
-              className="absolute -translate-x-1/2 pointer-events-none"
-              style={{ left: `${SPINE_X_PCT}%` }}
-            >
-              <div
-                className="w-0.5 h-24 rounded-full"
-                style={{
-                  background:
-                    "linear-gradient(to bottom, transparent 0%, rgba(255,255,255,0.95) 40%, rgb(167,139,250) 60%, transparent 100%)",
-                  boxShadow:
-                    "0 0 24px rgba(167,139,250,0.95), 0 0 48px rgba(167,139,250,0.5)",
-                }}
-              />
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {days.length === 0 && !historyDone && (
-          <div className="py-20 text-center font-mono text-xs text-text-muted">
-            indexing intel feed…
-          </div>
-        )}
-
-        <div className="relative">
-          {days.map((day) => (
-            <DayBlock
-              key={day.key}
-              day={day}
-              filter={filter}
-              hovered={hovered}
-              selected={selected}
-              arrivingIds={arrivingIds}
-              onHover={setHovered}
-              onSelect={setSelected}
-            />
           ))}
         </div>
+        <span className="ml-auto inline-flex items-center gap-2 text-sm" aria-live="polite">
+          <span
+            aria-hidden
+            className={`inline-block h-2 w-2 rounded-full ${
+              !connected ? "border-2 border-warn" : historyDone ? "bg-ok" : "border-2 border-text-muted"
+            }`}
+          />
+          <span className={!connected ? "text-warn" : "text-text-muted"}>
+            {!connected
+              ? "Live feed disconnected, reconnecting…"
+              : historyDone
+                ? "Live: new posts appear at the top"
+                : "Replaying history…"}
+          </span>
+        </span>
       </div>
 
-      {/* Legend */}
-      <div className="mt-6 flex flex-wrap gap-x-6 gap-y-1 font-mono text-[10px] tracking-[0.15em] text-text-muted">
-        <LegendDot color="rgb(167, 139, 250)" label="DISCUSSION" />
-        <LegendDot color="rgb(232, 163, 61)" label="SALE" />
-        <LegendDot color="rgb(229, 72, 77)" label="DOXXING" />
-        <LegendDot color="rgb(125, 211, 252)" label="RECRUITMENT" />
-        <span className="ml-auto opacity-70">
-          hover a node for its MITRE techniques · click for detail
+      <div className="mb-6 flex flex-wrap items-center gap-3">
+        <label className="relative min-w-[260px] flex-1">
+          <span className="sr-only">Search posts</span>
+          <input
+            ref={searchRef}
+            value={q}
+            onChange={(e) => setParam({ q: e.target.value || null })}
+            placeholder="Search titles, summaries, IOCs or a T-code…"
+            className="w-full border border-border-soft bg-surface-1 px-3 py-2 text-sm focus:border-text focus:outline-none"
+          />
+          <kbd className="pointer-events-none absolute top-1/2 right-2 -translate-y-1/2 border border-border-soft px-1.5 font-mono text-xs text-text-muted">/</kbd>
+        </label>
+        <span className="text-xs text-text-muted">
+          <kbd className="font-mono">j</kbd>/<kbd className="font-mono">k</kbd> move · <kbd className="font-mono">Enter</kbd> open ·{" "}
+          <kbd className="font-mono">Esc</kbd> close
         </span>
+      </div>
+
+      {historyDone && matching.length > 0 && (
+        <ActivityChart
+          posts={matching}
+          from={from}
+          to={to}
+          onRange={(a, b) => setParam({ from: a, to: b })}
+        />
+      )}
+
+      <div className="mb-4 flex flex-wrap gap-x-5 gap-y-1 text-xs text-text-muted">
+        {(Object.keys(PROVENANCE) as Provenance[]).map((k) => (
+          <span key={k} className="inline-flex items-center gap-1.5" title={PROVENANCE[k].description}>
+            <ProvenanceMark source={k} /> {PROVENANCE[k].label}
+          </span>
+        ))}
+      </div>
+
+      {all.length === 0 && !historyDone && <p className="py-16 text-sm text-text-muted">Loading the register…</p>}
+      {historyDone && days.length === 0 && (
+        <p className="border-t border-border-soft py-8 text-sm text-text-muted">
+          {all.length === 0 ? "No posts ingested yet. Run the scraper or a Scout job." : "No posts match these filters."}{" "}
+          {all.length > 0 && (
+            <button className="font-semibold text-accent underline" onClick={() => setParams({}, { replace: true })}>
+              Clear all filters
+            </button>
+          )}
+        </p>
+      )}
+
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[880px] border-collapse text-sm">
+          <thead className="sr-only">
+            <tr>
+              <th>Post</th><th>Time (UTC)</th><th>Thread</th><th>Intent</th><th>Techniques</th><th>IOCs</th>
+            </tr>
+          </thead>
+          {days.map(([key, list]) => (
+            <tbody key={key}>
+              <tr>
+                <th colSpan={6} scope="colgroup" className="border-b-2 border-rule pt-8 pb-1.5 text-left">
+                  <span className="text-base font-bold">{dayLabel(key)}</span>
+                  <span className="ml-3 font-normal text-text-muted tabular-nums">{list.length} posts</span>
+                </th>
+              </tr>
+              {list.map((p) => (
+                <PostRow
+                  key={p.id}
+                  post={p}
+                  active={p.id === cursorId}
+                  arriving={arriving.has(p.id)}
+                  onOpen={() => setSelected(p.id)}
+                />
+              ))}
+            </tbody>
+          ))}
+        </table>
       </div>
 
       <DetailPanel id={selected} onClose={() => setSelected(null)} />
-
-      <div className="h-32" />
     </div>
   );
 }
 
-function DayBlock({
-  day,
-  filter,
-  hovered,
-  selected,
-  arrivingIds,
-  onHover,
-  onSelect,
-}: {
-  day: DayGroup;
-  filter: Filter;
-  hovered: number | null;
-  selected: number | null;
-  arrivingIds: Set<number>;
-  onHover: (id: number | null) => void;
-  onSelect: (id: number) => void;
-}) {
-  return (
-    <div className="relative">
-      {/* Day marker on the spine */}
-      <div
-        className="relative flex items-center justify-center"
-        style={{ height: DAY_HEAD_H }}
-      >
-        <div
-          className="absolute left-1/2 -translate-x-1/2 px-3 py-1 border border-accent/60 bg-base/90 backdrop-blur-sm font-mono text-[10px] tracking-[0.25em] text-accent"
-          style={{ boxShadow: "0 0 18px rgba(167,139,250,0.35)" }}
-        >
-          {dayLabel(day.key)}
-          <span className="ml-2 text-text-muted">· {day.posts.length}</span>
-        </div>
-      </div>
-
-      {day.posts.map((p, i) => (
-        <PostBranch
-          key={p.id}
-          post={p}
-          side={i % 2 === 0 ? "right" : "left"}
-          dimmed={filter !== "all" && !passesFilter(p, filter)}
-          hot={hovered === p.id || selected === p.id}
-          arriving={arrivingIds.has(p.id)}
-          onHover={onHover}
-          onSelect={onSelect}
-        />
-      ))}
-    </div>
-  );
-}
-
-function PostBranch({
+function PostRow({
   post,
-  side,
-  dimmed,
-  hot,
   arriving,
-  onHover,
-  onSelect,
+  active,
+  onOpen,
 }: {
   post: TimelinePost;
-  side: "left" | "right";
-  dimmed: boolean;
-  hot: boolean;
   arriving: boolean;
-  onHover: (id: number | null) => void;
-  onSelect: (id: number) => void;
+  active: boolean;
+  onOpen: () => void;
 }) {
-  const color = intentColor(post.intent);
-  const techs = post.techniques.slice(0, 6);
-
+  const techs = post.techniques.slice(0, 4);
+  const translated = post.lang && post.lang !== "en" && post.lang !== "unknown";
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 12 }}
-      animate={{ opacity: dimmed ? 0.18 : 1, y: 0 }}
-      transition={{ duration: 0.35 }}
-      className="relative"
-      style={{ height: ROW_H }}
-      onMouseEnter={() => onHover(post.id)}
-      onMouseLeave={() => onHover(null)}
+    <tr
+      id={`post-row-${post.id}`}
+      onClick={onOpen}
+      aria-selected={active}
+      className={`cursor-pointer border-b border-border-soft align-baseline transition-[background-color,box-shadow] duration-700 hover:bg-surface-1 ${
+        active ? "bg-surface-1 outline outline-2 -outline-offset-2 outline-text " : ""
+      }${
+        arriving ? "bg-surface-1 shadow-[inset_3px_0_0_var(--color-accent)] [animation:row-in_600ms_cubic-bezier(0.16,1,0.3,1)]" : ""
+      }`}
     >
-      {/* Branch line */}
-      <div
-        className="absolute top-1/2 h-px"
-        style={{
-          left: side === "right" ? "50%" : "calc(50% - 18%)",
-          width: "18%",
-          background: `linear-gradient(${
-            side === "right" ? "to right" : "to left"
-          }, ${color}, transparent)`,
-          opacity: hot ? 0.95 : 0.55,
-        }}
-      />
-
-      {/* Node on the spine */}
-      <button
-        onClick={() => onSelect(post.id)}
-        className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2 group"
-        style={{ left: `${SPINE_X_PCT}%` }}
-      >
-        {arriving && [0, 0.35, 0.7, 1.05].map((delay, i) => (
-          <motion.span
-            key={i}
-            initial={{ scale: 0, opacity: 1 }}
-            animate={{ scale: 8, opacity: 0 }}
-            transition={{ duration: 2.6, delay, ease: "easeOut" }}
-            className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-6 h-6 rounded-full border-2 border-accent"
-            style={{ filter: "drop-shadow(0 0 12px rgba(167,139,250,0.9))" }}
-          />
-        ))}
-        {arriving && (
-          <motion.span
-            initial={{ opacity: 0, scaleY: 0 }}
-            animate={{ opacity: [0, 0.85, 0], scaleY: [0, 1, 1] }}
-            transition={{ duration: 4, ease: "easeOut" }}
-            className="absolute left-1/2 top-1/2 -translate-x-1/2 origin-top w-px pointer-events-none"
-            style={{
-              height: 64,
-              background:
-                "linear-gradient(to bottom, rgb(167,139,250), transparent)",
-              filter: "drop-shadow(0 0 6px rgba(167,139,250,0.8))",
-            }}
-          />
-        )}
-        <span
-          className="block rounded-full transition-all"
-          style={{
-            width: hot || arriving ? NODE_R * 2.6 : NODE_R * 2,
-            height: hot || arriving ? NODE_R * 2.6 : NODE_R * 2,
-            backgroundColor: color,
-            boxShadow: hot
-              ? `0 0 18px ${color}`
-              : `0 0 8px ${color}`,
-            border: arriving ? "1.5px solid white" : "none",
+      <td className="w-16 py-2.5 pr-3 pl-2">
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpen();
           }}
-        />
-      </button>
-
-      {/* Card on the chosen side */}
-      <button
-        onClick={() => onSelect(post.id)}
-        className={`absolute top-1/2 -translate-y-1/2 w-[36%] text-${
-          side === "right" ? "left" : "right"
-        } px-4 py-3 border bg-base/70 backdrop-blur-sm transition-colors ${
-          hot
-            ? "border-accent bg-accent/5"
-            : "border-border-soft hover:border-text-muted"
-        }`}
-        style={{
-          [side === "right" ? "left" : "right"]: "calc(50% + 4%)",
-        } as React.CSSProperties}
-      >
-        <div
-          className={`flex items-baseline gap-2 font-mono text-[10px] tracking-[0.18em] text-text-muted ${
-            side === "left" ? "flex-row-reverse" : ""
-          }`}
+          className="font-mono text-text-muted hover:text-accent"
+          aria-label={`Open post ${post.id}`}
         >
-          <span className="text-accent">#{post.id}</span>
-          <span>{post.category.toUpperCase()}</span>
-          {post.lang && post.lang !== "en" && post.lang !== "unknown" && (
-            <span
-              className="px-1 border border-accent/40 text-accent"
-              title={`translated from ${post.lang.toUpperCase()}`}
-            >
-              {post.lang.toUpperCase()} ⇄
-            </span>
-          )}
-          <span className="opacity-60">{timeLabel(post.source_created_at)}</span>
-          {post.intent && (
-            <span
-              className={`${
-                side === "left" ? "mr-auto" : "ml-auto"
-              } px-1.5 py-px border`}
-              style={{ borderColor: color, color }}
-            >
-              {post.intent.toUpperCase()}
-            </span>
-          )}
-        </div>
-        <div className="mt-1 font-display text-sm leading-tight text-text">
-          {post.thread_title}
-        </div>
-        {techs.length > 0 && (
-          <div
-            className={`mt-2 flex flex-wrap gap-1 ${
-              side === "left" ? "justify-end" : ""
-            }`}
-          >
-            {techs.map((t) => (
-              <span
-                key={t.technique_id + t.source}
-                className="font-mono text-[9px] px-1.5 py-px border"
-                style={{
-                  borderColor: TECH_COLOR[t.source] ?? "rgb(167,139,250)",
-                  color: TECH_COLOR[t.source] ?? "rgb(167,139,250)",
-                }}
-                title={t.name ?? ""}
-              >
-                {t.technique_id}
-              </span>
-            ))}
-            {post.techniques.length > techs.length && (
-              <span className="font-mono text-[9px] text-text-muted">
-                +{post.techniques.length - techs.length}
-              </span>
-            )}
-          </div>
+          #{post.id}
+        </button>
+      </td>
+      <td className="w-14 py-2.5 pr-4 text-text-muted tabular-nums">{timeLabel(post.source_created_at)}</td>
+      <td className="py-2.5 pr-4">
+        <span className="font-semibold">{post.thread_title}</span>
+        <span className="ml-2 text-xs text-text-muted">{post.category}</span>
+        {translated && (
+          <span className="ml-2 border border-border-soft px-1 text-xs text-text-muted" title="Translated before analysis">
+            {post.lang!.toUpperCase()}–EN
+          </span>
         )}
-        {arriving && (
-          <motion.span
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            className={`absolute top-1 ${
-              side === "right" ? "right-2" : "left-2"
-            } font-mono text-[9px] tracking-[0.2em] text-accent`}
-          >
-            [ NEW ]
-          </motion.span>
-        )}
-      </button>
-    </motion.div>
+        {arriving && <span className="ml-2 text-xs font-bold text-accent">New</span>}
+      </td>
+      <td className="w-28 py-2.5 pr-4 font-semibold" style={{ color: intentColor(post.intent) }}>
+        {post.intent ?? <span className="font-normal text-text-muted">—</span>}
+      </td>
+      <td className="w-64 py-2.5 pr-4">
+        <span className="flex flex-wrap gap-x-3 gap-y-1">
+          {techs.map((t) => (
+            <span
+              key={t.technique_id + t.source}
+              className="inline-flex items-center gap-1.5 font-mono text-xs"
+              title={`${t.name ?? "Not in corpus"} · ${PROVENANCE[t.source as Provenance]?.label ?? t.source}`}
+            >
+              <ProvenanceMark source={t.source} size={8} />
+              {t.technique_id}
+            </span>
+          ))}
+          {post.techniques.length > techs.length && (
+            <span className="text-xs text-text-muted">+{post.techniques.length - techs.length}</span>
+          )}
+        </span>
+      </td>
+      <td className="w-24 py-2.5 pr-2 text-right text-xs text-text-muted tabular-nums">
+        {post.iocs.length > 0 ? `${post.iocs.length} IOC${post.iocs.length > 1 ? "s" : ""}` : "—"}
+      </td>
+    </tr>
   );
 }
 
-function ArrivalBanner({
-  ids,
-  merged,
+/* ----------------------------------------------------------------------- *
+ * Activity over time. One bar per day: sales (the signal) stacked under
+ * everything else. Drag across the chart to keep a date range; click a bar for
+ * one day; the selection writes ?from=&to= into the URL.
+ * ----------------------------------------------------------------------- */
+function ActivityChart({
+  posts,
+  from,
+  to,
+  onRange,
 }: {
-  ids: number[];
-  merged: TimelinePost[];
+  posts: TimelinePost[];
+  from: string | null;
+  to: string | null;
+  onRange: (from: string | null, to: string | null) => void;
 }) {
-  const newestId = ids.length ? Math.max(...ids) : null;
-  const post =
-    newestId !== null ? merged.find((p) => p.id === newestId) ?? null : null;
-  return (
-    <AnimatePresence>
-      {post && (
-        <motion.div
-          key={post.id}
-          initial={{ opacity: 0, y: -10 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -10 }}
-          transition={{ duration: 0.25 }}
-          className="mb-3 flex items-center gap-3 border border-accent bg-accent/10 px-4 py-3 font-mono text-xs"
-          style={{ boxShadow: "0 0 30px rgba(167, 139, 250, 0.45)" }}
-        >
-          <motion.span
-            animate={{ opacity: [1, 0.3, 1] }}
-            transition={{ duration: 0.8, repeat: 3 }}
-            className="inline-block w-2 h-2 rounded-full bg-accent shadow-[0_0_10px_var(--color-accent)]"
-          />
-          <span className="text-accent tracking-[0.2em] font-bold">
-            NEW INTEL · #{post.id}
-          </span>
-          <span className="text-text truncate">{post.thread_title}</span>
-          <span className="ml-auto text-text-muted tracking-[0.15em]">
-            {post.intent?.toUpperCase() ?? "—"}
-          </span>
-        </motion.div>
-      )}
-    </AnimatePresence>
-  );
-}
+  const bars = useMemo(() => {
+    const m = new Map<string, { sale: number; other: number }>();
+    for (const p of posts) {
+      const k = dayKey(p.source_created_at);
+      const b = m.get(k) ?? { sale: 0, other: 0 };
+      p.intent === "sale" ? b.sale++ : b.other++;
+      m.set(k, b);
+    }
+    // Fill gaps so the x-axis is real time, not just days that had posts.
+    const keys = [...m.keys()].sort();
+    const out: { day: string; sale: number; other: number }[] = [];
+    if (!keys.length) return out;
+    for (let d = new Date(keys[0] + "T00:00:00Z"); d <= new Date(keys[keys.length - 1] + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + 1)) {
+      const k = d.toISOString().slice(0, 10);
+      out.push({ day: k, ...(m.get(k) ?? { sale: 0, other: 0 }) });
+    }
+    return out;
+  }, [posts]);
 
-function LegendDot({ color, label }: { color: string; label: string }) {
+  const W = 1200, H = 120, PAD = 18;
+  const max = Math.max(1, ...bars.map((b) => b.sale + b.other));
+  const bw = (W - PAD * 2) / Math.max(1, bars.length);
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [dragFrom, setDragFrom] = useState<number | null>(null);
+  const [dragTo, setDragTo] = useState<number | null>(null);
+
+  const idxAt = (clientX: number) => {
+    const r = svgRef.current!.getBoundingClientRect();
+    const x = ((clientX - r.left) / r.width) * W;
+    return Math.max(0, Math.min(bars.length - 1, Math.floor((x - PAD) / bw)));
+  };
+  const inSel = (i: number) => {
+    if (dragFrom !== null && dragTo !== null) return i >= Math.min(dragFrom, dragTo) && i <= Math.max(dragFrom, dragTo);
+    const d = bars[i].day;
+    return (!from || d >= from) && (!to || d <= to);
+  };
+  const hasRange = !!(from || to);
+  const fmtDay = (k: string) =>
+    new Date(k + "T00:00:00Z").toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
+
   return (
-    <span className="inline-flex items-center gap-2">
-      <span
-        className="inline-block w-1.5 h-1.5 rounded-full"
-        style={{ backgroundColor: color }}
-      />
-      {label}
-    </span>
+    <figure className="m-0 mb-6">
+      <div className="mb-1 flex items-baseline gap-4 text-xs text-text-muted">
+        <span className="font-bold text-text">Activity</span>
+        <span><span className="mr-1 inline-block h-2.5 w-2.5 bg-accent align-middle" />Sale</span>
+        <span><span className="mr-1 inline-block h-2.5 w-2.5 bg-text align-middle" />Other intents</span>
+        <span className="ml-auto">
+          {hasRange ? (
+            <>
+              {from ? fmtDay(from) : "start"} – {to ? fmtDay(to) : "now"} ·{" "}
+              <button className="font-semibold text-accent underline" onClick={() => onRange(null, null)}>
+                Clear range
+              </button>
+            </>
+          ) : (
+            "Drag across the chart to filter by date"
+          )}
+        </span>
+      </div>
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${W} ${H}`}
+        className="block h-28 w-full cursor-crosshair touch-none select-none border-b border-text"
+        preserveAspectRatio="none"
+        role="img"
+        aria-label={`Posts per day, ${bars.length} days`}
+        onPointerDown={(e) => {
+          (e.target as Element).setPointerCapture?.(e.pointerId);
+          const i = idxAt(e.clientX);
+          setDragFrom(i);
+          setDragTo(i);
+        }}
+        onPointerMove={(e) => dragFrom !== null && setDragTo(idxAt(e.clientX))}
+        onPointerUp={() => {
+          if (dragFrom === null || dragTo === null) return;
+          const a = Math.min(dragFrom, dragTo), b = Math.max(dragFrom, dragTo);
+          onRange(bars[a].day, bars[b].day);
+          setDragFrom(null);
+          setDragTo(null);
+        }}
+      >
+        {bars.map((b, i) => {
+          const x = PAD + i * bw;
+          const hOther = ((H - 8) * b.other) / max;
+          const hSale = ((H - 8) * b.sale) / max;
+          const on = !hasRange && dragFrom === null ? true : inSel(i);
+          return (
+            <g key={b.day} opacity={on ? 1 : 0.2}>
+              <title>{`${fmtDay(b.day)}: ${b.sale + b.other} posts (${b.sale} sale)`}</title>
+              <rect x={x + 1} y={H - hSale} width={Math.max(1, bw - 2)} height={hSale} fill="var(--color-accent)" />
+              <rect x={x + 1} y={H - hSale - hOther} width={Math.max(1, bw - 2)} height={hOther} fill="var(--color-text)" />
+            </g>
+          );
+        })}
+      </svg>
+      <div className="mt-1 flex justify-between text-xs text-text-muted tabular-nums">
+        <span>{bars[0] && fmtDay(bars[0].day)}</span>
+        <span>{bars.length > 0 && `peak ${max} posts/day`}</span>
+        <span>{bars.length > 0 && fmtDay(bars[bars.length - 1].day)}</span>
+      </div>
+    </figure>
   );
 }

@@ -56,6 +56,11 @@ class Store:
             self.conn.execute("ALTER TABLE raw_posts ADD COLUMN lang_confidence REAL")
         if "body_en" not in cols:
             self.conn.execute("ALTER TABLE raw_posts ADD COLUMN body_en TEXT")
+        self._migrate_composite_post_key()
+        self._ensure_search_index()
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_raw_posts_processed ON raw_posts(processed_at)"
+        )
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_raw_posts_source ON raw_posts(source)"
         )
@@ -63,6 +68,92 @@ class Store:
             "CREATE INDEX IF NOT EXISTS idx_raw_posts_lang ON raw_posts(lang)"
         )
         self.conn.commit()
+
+    def _migrate_composite_post_key(self) -> None:
+        """Rebuild raw_posts if it still has the old global UNIQUE(source_post_id).
+
+        Older DBs made source_post_id unique across ALL forums, which forced the
+        HTML scraper to offset ids into per-forum blocks to avoid collisions.
+        The real identity of a post is (source, source_post_id). SQLite can't
+        drop a column constraint in place, so we follow its documented
+        table-rebuild procedure: create the new table, copy, drop, rename —
+        with foreign keys off so child rows (iocs, entities, …) are untouched.
+        Row ids are preserved, so every FK still points at the same post.
+        """
+        sql = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='raw_posts'"
+        ).fetchone()["sql"]
+        if "UNIQUE(source, source_post_id)" in sql.replace("\n", " "):
+            return
+        cols = [r["name"] for r in self.conn.execute("PRAGMA table_info(raw_posts)")]
+        col_list = ", ".join(cols)
+        self.conn.commit()
+        self.conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            self.conn.executescript(f"""
+                BEGIN;
+                CREATE TABLE raw_posts_new (
+                    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_post_id      INTEGER NOT NULL,
+                    source_thread_id    INTEGER NOT NULL,
+                    thread_title        TEXT    NOT NULL,
+                    category            TEXT    NOT NULL,
+                    author              TEXT    NOT NULL,
+                    body                TEXT    NOT NULL,
+                    source_created_at   REAL    NOT NULL,
+                    fetched_at          REAL    NOT NULL,
+                    source              TEXT    NOT NULL DEFAULT 'darkbay',
+                    lang                TEXT,
+                    lang_confidence     REAL,
+                    body_en             TEXT,
+                    processed_at        REAL,
+                    UNIQUE(source, source_post_id)
+                );
+                INSERT INTO raw_posts_new ({col_list}) SELECT {col_list} FROM raw_posts;
+                DROP TABLE raw_posts;
+                ALTER TABLE raw_posts_new RENAME TO raw_posts;
+                CREATE INDEX IF NOT EXISTS idx_raw_posts_source_created ON raw_posts(source_created_at);
+                CREATE INDEX IF NOT EXISTS idx_raw_posts_thread         ON raw_posts(source_thread_id);
+                CREATE INDEX IF NOT EXISTS idx_raw_posts_category       ON raw_posts(category);
+                COMMIT;
+            """)
+        finally:
+            self.conn.execute("PRAGMA foreign_keys = ON")
+
+    def _ensure_search_index(self) -> None:
+        """Full-text index (FTS5) over post titles and bodies, for discovery.
+
+        External-content table: the text lives in raw_posts; posts_fts stores
+        only the index. Triggers keep it in sync on every insert/update/delete.
+        Created here (not in schema.sql) because the composite-key migration
+        rebuilds raw_posts, which drops any triggers attached to it.
+        """
+        self.conn.executescript("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS posts_fts USING fts5(
+                thread_title, body, body_en,
+                content='raw_posts', content_rowid='id',
+                tokenize='porter unicode61'
+            );
+            CREATE TRIGGER IF NOT EXISTS raw_posts_ai AFTER INSERT ON raw_posts BEGIN
+                INSERT INTO posts_fts(rowid, thread_title, body, body_en)
+                VALUES (new.id, new.thread_title, new.body, new.body_en);
+            END;
+            CREATE TRIGGER IF NOT EXISTS raw_posts_ad AFTER DELETE ON raw_posts BEGIN
+                INSERT INTO posts_fts(posts_fts, rowid, thread_title, body, body_en)
+                VALUES ('delete', old.id, old.thread_title, old.body, old.body_en);
+            END;
+            CREATE TRIGGER IF NOT EXISTS raw_posts_au AFTER UPDATE OF thread_title, body, body_en ON raw_posts BEGIN
+                INSERT INTO posts_fts(posts_fts, rowid, thread_title, body, body_en)
+                VALUES ('delete', old.id, old.thread_title, old.body, old.body_en);
+                INSERT INTO posts_fts(rowid, thread_title, body, body_en)
+                VALUES (new.id, new.thread_title, new.body, new.body_en);
+            END;
+        """)
+        indexed = self.conn.execute("SELECT COUNT(*) FROM posts_fts_docsize").fetchone()[0]
+        total = self.conn.execute("SELECT COUNT(*) FROM raw_posts").fetchone()[0]
+        if indexed != total:
+            # First run (or index out of step): rebuild from raw_posts.
+            self.conn.execute("INSERT INTO posts_fts(posts_fts) VALUES ('rebuild')")
 
     def close(self) -> None:
         self.conn.close()
@@ -102,7 +193,7 @@ class Store:
     # --- inserts ---------------------------------------------------------- #
 
     def insert_posts(self, posts: Iterable[dict], source: str = "darkbay") -> tuple[int, int]:
-        """Insert posts, ignoring duplicates by source_post_id.
+        """Insert posts, ignoring duplicates by (source, source_post_id).
 
         `source` records which forum the batch came from — 'darkbay' for the
         original JSON-API forum, or an .onion host / label for posts pulled by
@@ -139,7 +230,7 @@ class Store:
                 )
                 inserted += 1
             except sqlite3.IntegrityError:
-                # UNIQUE constraint on source_post_id — already have it.
+                # UNIQUE(source, source_post_id) — already have it.
                 duplicates += 1
 
         self.conn.commit()

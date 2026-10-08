@@ -28,6 +28,23 @@ from dataclasses import dataclass
 from typing import Iterable
 
 import spacy
+import tldextract
+
+# Public Suffix List check for domain candidates. suffix_list_urls=() makes
+# tldextract use its bundled PSL snapshot — no network call, ever.
+_TLD = tldextract.TLDExtract(suffix_list_urls=())
+
+
+def _is_real_domain(candidate: str) -> bool:
+    """True only if the candidate ends in a real public suffix.
+
+    The domain regex alone matches anything shaped like `word.word`, so
+    `node.js`, `file.exe`, or `config.yaml` would be reported as domains.
+    Requiring a registered suffix (com, xyz, co.uk, …) removes those.
+    """
+    ext = _TLD(candidate)
+    return bool(ext.suffix) and bool(ext.domain)
+
 
 # --- regex patterns --------------------------------------------------------- #
 
@@ -123,7 +140,9 @@ class IOCExtractor:
             spans_consumed.append(m.span())
 
         for m in _URL_RE.finditer(t):
-            add("url", m)
+            # Sentence punctuation after a URL ("see https://x.io/a.") is not
+            # part of it.
+            add("url", m, value=m.group(0).rstrip(".,;:!?"))
 
         for m in _EMAIL_RE.finditer(t):
             add("email", m)
@@ -156,6 +175,8 @@ class IOCExtractor:
         # Domains last, skip anything already inside a URL or email.
         for m in _DOMAIN_RE.finditer(t):
             if _overlaps(m.span(), spans_consumed):
+                continue
+            if not _is_real_domain(m.group(0)):
                 continue
             add("domain", m, value=m.group(0).lower())
 

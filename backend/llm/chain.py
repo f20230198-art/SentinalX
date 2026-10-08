@@ -18,6 +18,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from backend.llm import schemas
 from backend.llm.client import AsyncOllamaClient, OllamaClient
 from backend.llm.prompts import (
     prompt_intent,
@@ -92,10 +93,8 @@ def analyse_post(
     sys_p, usr_p, _ = prompt_intent(thread_title, category, body, iocs, entities)
     try:
         g = client.generate(usr_p, system=sys_p, json_mode=True, num_predict=200)
-        out.intent = _extract_json(g.text)
         out.raw_responses["intent"] = g.raw
-        if out.intent is None:
-            out.errors.append(f"intent: unparseable JSON: {g.text[:200]!r}")
+        _apply_json(out, "intent", g.text)
     except Exception as e:
         out.errors.append(f"intent: {e!r}")
 
@@ -103,10 +102,8 @@ def analyse_post(
     sys_p, usr_p, _ = prompt_targets(thread_title, category, body, iocs, entities)
     try:
         g = client.generate(usr_p, system=sys_p, json_mode=True, num_predict=300)
-        out.targets = _extract_json(g.text)
         out.raw_responses["targets"] = g.raw
-        if out.targets is None:
-            out.errors.append(f"targets: unparseable JSON: {g.text[:200]!r}")
+        _apply_json(out, "targets", g.text)
     except Exception as e:
         out.errors.append(f"targets: {e!r}")
 
@@ -114,10 +111,8 @@ def analyse_post(
     sys_p, usr_p, _ = prompt_techniques(thread_title, category, body, iocs, entities)
     try:
         g = client.generate(usr_p, system=sys_p, json_mode=True, num_predict=500)
-        out.techniques = _extract_json(g.text)
         out.raw_responses["techniques"] = g.raw
-        if out.techniques is None:
-            out.errors.append(f"techniques: unparseable JSON: {g.text[:200]!r}")
+        _apply_json(out, "techniques", g.text)
     except Exception as e:
         out.errors.append(f"techniques: {e!r}")
 
@@ -189,17 +184,21 @@ async def analyse_post_async(
         out.raw_responses[name] = gen.raw
         if name == "summary":
             out.summary = gen.text.strip() or None
-        elif name == "intent":
-            out.intent = _extract_json(gen.text)
-            if out.intent is None:
-                out.errors.append(f"intent: unparseable JSON: {gen.text[:200]!r}")
-        elif name == "targets":
-            out.targets = _extract_json(gen.text)
-            if out.targets is None:
-                out.errors.append(f"targets: unparseable JSON: {gen.text[:200]!r}")
-        elif name == "techniques":
-            out.techniques = _extract_json(gen.text)
-            if out.techniques is None:
-                out.errors.append(f"techniques: unparseable JSON: {gen.text[:200]!r}")
+        else:
+            _apply_json(out, name, gen.text)
 
     return out
+
+
+def _apply_json(out: Analysis, name: str, text: str) -> None:
+    """Parse + schema-validate one JSON-mode response onto `out`.
+
+    Parsing alone isn't enough: valid JSON can still have the wrong keys,
+    an intent outside our label set, or a shape a prompt-injected post asked
+    for. Anything that fails validation is stored as None with an error, so
+    downstream stages never see unvalidated model output.
+    """
+    clean, err = schemas.validate(name, _extract_json(text))
+    setattr(out, name, clean)
+    if err:
+        out.errors.append(f"{name}: {err}: {text[:200]!r}")

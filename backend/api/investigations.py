@@ -30,6 +30,7 @@ from typing import Any
 
 from backend.llm.client import OllamaClient
 from backend.llm.lenses import get_lens
+from backend.llm.prompts import UNTRUSTED_END, UNTRUSTED_RULE, UNTRUSTED_START, fence_untrusted
 
 # Cap on how many posts get fed into a single rerun prompt. Mistral's effective
 # context for our setup is ~8k tokens; at ~400 tokens of body+enrichment per
@@ -64,9 +65,10 @@ def _build_where(filters: dict) -> tuple[str, list[Any], str]:
         )
         join_args.append(str(filters["technique"]).upper())
     if filters.get("q"):
-        where.append("(rp.body LIKE ? OR rp.thread_title LIKE ?)")
+        # Search the English translation too, matching /posts.
+        where.append("(rp.body LIKE ? OR rp.body_en LIKE ? OR rp.thread_title LIKE ?)")
         like = f"%{filters['q']}%"
-        where_args.extend([like, like])
+        where_args.extend([like, like, like])
     if filters.get("ioc_type"):
         joins.append(
             "JOIN iocs ioc_f ON ioc_f.raw_post_id = rp.id AND ioc_f.ioc_type = ?"
@@ -134,7 +136,10 @@ def count_filter(conn: sqlite3.Connection, filters: dict) -> int:
 def _pack_post_for_lens(conn: sqlite3.Connection, post_id: int) -> str:
     """Render one post + its enrichment as a compact text block for the LLM."""
     p = conn.execute(
-        "SELECT id, thread_title, category, author, body, source_created_at "
+        # COALESCE(body_en, body): the lens LLM reasons in English, like the
+        # per-post chain, so non-English posts are packed as their translation.
+        "SELECT id, thread_title, category, author, "
+        "  COALESCE(body_en, body) AS body, source_created_at "
         "FROM raw_posts WHERE id = ?", (post_id,)
     ).fetchone()
     if not p:
@@ -159,10 +164,15 @@ def _pack_post_for_lens(conn: sqlite3.Connection, post_id: int) -> str:
     ).fetchall()
 
     body = (p["body"] or "")[:MAX_BODY_CHARS]
+    # Only the forum-written fields are untrusted; the enrichment lines below
+    # come from our own pipeline and stay outside the fence.
     parts = [
-        f"=== POST [#{p['id']}] === ({p['category']} / {p['author']})",
-        f"TITLE: {p['thread_title']}",
-        f"BODY: {body}",
+        f"=== POST [#{p['id']}] ===",
+        UNTRUSTED_START,
+        f"CATEGORY/AUTHOR: {fence_untrusted(p['category'])} / {fence_untrusted(p['author'])}",
+        f"TITLE: {fence_untrusted(p['thread_title'])}",
+        f"BODY: {fence_untrusted(body)}",
+        UNTRUSTED_END,
     ]
     if la:
         if la["intent"]:
@@ -230,7 +240,7 @@ def run_lens_summary(
         with OllamaClient(model=model) as cli:
             gen = cli.generate(
                 prompt,
-                system=lens.system,
+                system=lens.system + UNTRUSTED_RULE,
                 json_mode=False,
                 temperature=0.2,
                 num_predict=1500,

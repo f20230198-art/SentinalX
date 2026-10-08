@@ -14,6 +14,8 @@ import {
 import { api, type PostDetail } from "../lib/api";
 import { SectionDivider } from "../components/Shell";
 import { DetailPanel } from "../components/DetailPanel";
+import { QueryError } from "../components/Evidence";
+import { iocColor as colorFor, INK, PAPER } from "../lib/palette";
 
 /* ----------------------------------------------------------------------- *
  * IOC pivot graph.
@@ -31,19 +33,6 @@ const MAX_POSTS = 30;
 const VIEW_W = 1100;
 const VIEW_H = 540;
 
-const TYPE_COLOR: Record<string, string> = {
-  ipv4: "rgb(125, 211, 252)",
-  ipv6: "rgb(125, 211, 252)",
-  domain: "rgb(167, 139, 250)",
-  url: "rgb(167, 139, 250)",
-  email: "rgb(196, 181, 253)",
-  btc: "rgb(232, 163, 61)",
-  cve: "rgb(229, 72, 77)",
-  md5: "rgb(110, 231, 183)",
-  sha1: "rgb(110, 231, 183)",
-  sha256: "rgb(110, 231, 183)",
-};
-const colorFor = (t: string) => TYPE_COLOR[t] ?? "rgb(167, 139, 250)";
 
 interface PivotNode extends SimulationNodeDatum {
   id: string;
@@ -118,46 +107,43 @@ export function IocPivot() {
 
   if (!value) {
     return (
-      <div className="max-w-[1440px] mx-auto px-8 pt-12">
-        <div className="font-mono text-sm text-text-muted">
-          missing IOC value in URL.
-        </div>
+      <div className="mx-auto max-w-[1440px] px-4 pt-12 sm:px-8">
+        <p className="text-sm text-text-muted">
+          No IOC in the address. Open one from a post's IOC list to pivot on it.
+        </p>
       </div>
     );
   }
 
   return (
-    <div className="max-w-[1840px] mx-auto px-8">
+    <div className="mx-auto max-w-[1840px] px-4 pb-24 sm:px-8">
       <SectionDivider
         index="05"
         label="IOC pivot"
         trailing={
           list.isLoading
-            ? "loading…"
+            ? "Searching…"
             : `${postIds.length}${postIds.length === MAX_POSTS ? "+" : ""} posts · ${types.join(", ") || "—"}`
         }
       />
 
-      <div className="mb-3 flex items-baseline gap-3 font-mono">
-        <span className="text-[10px] tracking-[0.2em] text-text-muted">
-          PIVOT ON
+      <div className="mb-6 flex flex-wrap items-baseline gap-x-4 gap-y-1">
+        <h1 className="m-0 break-all font-mono text-2xl font-semibold tracking-normal">{value}</h1>
+        <span className="text-sm text-text-muted">
+          Every post that mentions this indicator. Shared indicators below lead to related posts.
         </span>
-        <span className="text-accent text-base break-all">{value}</span>
-        <span className="ml-auto text-[10px] text-text-muted">
-          <Link to="/posts" className="hover:text-accent">
-            ← back to feed
-          </Link>
-        </span>
+        <Link to="/posts" className="ml-auto text-sm font-semibold text-accent underline">
+          Back to posts
+        </Link>
       </div>
+      {list.isError && <QueryError what="matching posts" error={list.error} onRetry={() => list.refetch()} />}
 
       {list.isLoading ? (
-        <div className="font-mono text-xs text-text-muted">
-          searching corpus…
-        </div>
+        <p className="text-sm text-text-muted">Searching the corpus…</p>
       ) : exact.length === 0 ? (
-        <div className="border border-dashed border-border-soft p-8 font-mono text-xs text-text-muted">
-          no posts mention this IOC.
-        </div>
+        <p className="border border-dashed border-border-soft p-8 text-sm text-text-muted">
+          No post mentions this exact indicator.
+        </p>
       ) : (
         <PivotGraph
           value={value}
@@ -170,19 +156,19 @@ export function IocPivot() {
 
       {coIocs.length > 0 && (
         <section className="mt-8">
-          <div className="font-mono text-[10px] tracking-[0.2em] text-text-muted mb-2">
-            CO-OCCURRING IOCS ACROSS THESE POSTS
-          </div>
+          <h3 className="m-0 mb-3 border-t-2 border-rule pt-2 text-sm font-bold">
+            Indicators that appear alongside it
+          </h3>
           <div className="flex flex-wrap gap-1.5">
             {coIocs.map((c) => (
               <Link
                 key={c.type + c.value}
                 to={`/iocs/${encodeURIComponent(c.value)}`}
-                className="font-mono text-[11px] border border-border-soft px-2 py-1 hover:border-accent hover:text-accent transition-colors"
-                title={`appears in ${c.n} of these posts`}
+                className="border border-border-soft bg-surface-1 px-2 py-1 font-mono text-xs no-underline hover:border-text"
+                title={`Appears in ${c.n} of these posts`}
               >
                 <span
-                  className="inline-block w-1.5 h-1.5 rounded-full mr-1.5 align-middle"
+                  className="mr-1.5 inline-block h-2 w-2 align-middle"
                   style={{ backgroundColor: colorFor(c.type) }}
                 />
                 <span className="text-text-muted">{c.type}</span>{" "}
@@ -271,7 +257,7 @@ function PivotGraph({
   void tick;
 
   return (
-    <div className="border border-border-soft bg-surface-1/30 backdrop-blur-sm">
+    <div className="border border-text bg-surface-1">
       <svg
         ref={svgRef}
         viewBox={`0 0 ${VIEW_W} ${VIEW_H}`}
@@ -289,7 +275,7 @@ function PivotGraph({
               y1={s.y}
               x2={t.x}
               y2={t.y}
-              stroke="rgba(167, 139, 250, 0.25)"
+              stroke="rgba(230,237,231,0.22)"
               strokeWidth={1}
             />
           );
@@ -302,30 +288,29 @@ function PivotGraph({
             <g transform={`translate(${c.x},${c.y})`}>
               <circle
                 r={26}
-                fill="rgba(167, 139, 250, 0.15)"
-                stroke="rgb(167, 139, 250)"
-                strokeWidth={1.5}
-                style={{ filter: "drop-shadow(0 0 14px rgba(167,139,250,0.5))" }}
+                fill={PAPER}
+                stroke={INK}
+                strokeWidth={2}
+                
               />
-              <circle r={10} fill={colorFor(types[0] ?? "")} />
+              <rect x={-9} y={-9} width={18} height={18} fill={colorFor(types[0] ?? "")} />
               <text
                 y={48}
                 textAnchor="middle"
-                fontFamily="JetBrains Mono, monospace"
+                fontFamily="Public Sans Variable, sans-serif"
                 fontSize={11}
-                fill="rgba(230,227,240,0.95)"
+                fill="rgba(230,237,231,0.95)"
               >
                 {truncate(c.label, 36)}
               </text>
               <text
                 y={62}
                 textAnchor="middle"
-                fontFamily="JetBrains Mono, monospace"
+                fontFamily="Public Sans Variable, sans-serif"
                 fontSize={9}
-                fill="rgba(230,227,240,0.55)"
-                letterSpacing="0.18em"
+                fill="rgba(230,237,231,0.6)"
               >
-                {(types[0] ?? "—").toUpperCase()}
+                {types[0] ?? "—"}
               </text>
             </g>
           );
@@ -341,16 +326,16 @@ function PivotGraph({
           >
             <circle
               r={8}
-              fill="rgb(167, 139, 250)"
-              stroke="rgba(255,255,255,0.4)"
+              fill={INK}
+              stroke="rgba(0,0,0,0.5)"
               strokeWidth={0.5}
             />
             <text
               x={12}
               y={4}
-              fontFamily="JetBrains Mono, monospace"
+              fontFamily="Public Sans Variable, sans-serif"
               fontSize={10}
-              fill="rgba(230,227,240,0.85)"
+              fill="rgba(230,237,231,0.85)"
             >
               #{n.postId} {truncate(n.label, 28)}
             </text>

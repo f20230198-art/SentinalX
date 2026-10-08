@@ -47,11 +47,12 @@ DEFAULT_SOCKS_PROXY = "socks5://127.0.0.1:9051"
 # Safety caps so a hostile or huge forum can't run the scraper forever.
 DEFAULT_MAX_LISTINGS = 500
 
-# raw_posts.source_post_id is globally UNIQUE, but each forum numbers its own
-# posts from 1 — so DarkBay post #30 and SilkVault message #30 would collide.
-# The HTML scraper offsets every id into a forum-specific block keyed by a hash
-# of the source label, well clear of DarkBay's low ids. 1e9 spacing per block
-# leaves room for a billion posts per forum before two blocks could ever meet.
+# Post identity is UNIQUE(source, source_post_id), so two forums can both have
+# a post #30 without colliding. The per-forum id offset below predates that
+# composite key; it is kept only so rows already stored for HTML forums keep
+# the same source_post_id (re-crawls still dedupe against them). It is no
+# longer needed for correctness — even if two labels hash to the same block,
+# their `source` differs and the composite key keeps them apart.
 ID_BLOCK_SIZE = 1_000_000_000
 
 

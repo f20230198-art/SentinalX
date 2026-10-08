@@ -10,7 +10,10 @@
 
 CREATE TABLE IF NOT EXISTS raw_posts (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_post_id      INTEGER NOT NULL UNIQUE,
+    -- Unique per FORUM, not globally: each forum numbers its posts from 1, so
+    -- the identity of a post is (source, source_post_id). See the UNIQUE
+    -- constraint at the bottom of this table.
+    source_post_id      INTEGER NOT NULL,
     source_thread_id    INTEGER NOT NULL,
     thread_title        TEXT    NOT NULL,
     category            TEXT    NOT NULL,
@@ -29,7 +32,9 @@ CREATE TABLE IF NOT EXISTS raw_posts (
     -- All three are filled by the extraction step before IOC/NER run.
     lang                TEXT,
     lang_confidence     REAL,
-    body_en             TEXT
+    body_en             TEXT,
+    processed_at        REAL,
+    UNIQUE(source, source_post_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_raw_posts_source_created ON raw_posts(source_created_at);
@@ -303,3 +308,34 @@ CREATE TABLE IF NOT EXISTS pipeline_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_created ON pipeline_jobs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_status  ON pipeline_jobs(status);
+
+-- Watchlists + alerts.
+--
+-- A watchlist is a named set of terms an analyst cares about (their company,
+-- domains, product names, a wallet). Every post that mentions any term becomes
+-- a watch_hit, i.e. an alert. Matching uses the posts_fts full-text index with
+-- exact-phrase queries and is incremental: `last_post_id` is a per-watchlist
+-- cursor, so each check only scans posts ingested since the previous one.
+-- UNIQUE(watchlist_id, raw_post_id) makes re-checking idempotent.
+
+CREATE TABLE IF NOT EXISTS watchlists (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT    NOT NULL,
+    terms_json      TEXT    NOT NULL,
+    created_at      REAL    NOT NULL,
+    last_post_id    INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS watch_hits (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    watchlist_id    INTEGER NOT NULL,
+    raw_post_id     INTEGER NOT NULL,
+    matched_terms   TEXT    NOT NULL,
+    created_at      REAL    NOT NULL,
+    seen            INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(watchlist_id, raw_post_id),
+    FOREIGN KEY(watchlist_id) REFERENCES watchlists(id) ON DELETE CASCADE,
+    FOREIGN KEY(raw_post_id)  REFERENCES raw_posts(id)  ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_watch_hits_unseen ON watch_hits(seen, created_at DESC);

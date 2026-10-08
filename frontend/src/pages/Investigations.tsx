@@ -1,26 +1,35 @@
-import { useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { motion, AnimatePresence } from "framer-motion";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   api,
   type Investigation,
   type InvestigationMitigation,
   type Lens,
+  type PostDetail,
 } from "../lib/api";
 import { SectionDivider } from "../components/Shell";
 import { DetailPanel } from "../components/DetailPanel";
 import { CitationText } from "../components/CitationText";
+import { QueryError } from "../components/Evidence";
+import { intentColor } from "../lib/palette";
 
 /* ----------------------------------------------------------------------- *
- * Investigations page.
+ * Investigations: saved filters over the corpus, each with an optional lens
+ * summary whose [#id] citations open the cited post.
  *
- * Left column: investigation list (compact rows).
- * Right column: selected investigation — filters, matched posts, lens
- *   summary with [#NNN] citations rendered as clickable post links.
- *
- * Bottom sheet: a small "create" form (name + lens + simple filter chips).
+ * Left: the case list. Right: the selected case file — filter, lens summary
+ * (the payoff), priority mitigations, matched posts.
  * ----------------------------------------------------------------------- */
+
+const EvidenceGraph = lazy(() =>
+  import("../components/EvidenceGraph").then((m) => ({ default: m.EvidenceGraph })),
+);
+
+const btn =
+  "border border-text px-3 py-1.5 text-sm font-semibold no-underline hover:bg-text hover:text-surface-1 disabled:cursor-not-allowed disabled:opacity-40";
+const btnPrimary =
+  "border border-accent bg-accent px-3 py-1.5 text-sm font-semibold text-surface-1 no-underline hover:bg-accent-strong disabled:cursor-not-allowed disabled:opacity-40";
 
 export function Investigations() {
   const qc = useQueryClient();
@@ -28,13 +37,8 @@ export function Investigations() {
   const [postId, setPostId] = useState<number | null>(null);
   const [creating, setCreating] = useState(false);
 
-  const list = useQuery({
-    queryKey: ["investigations"],
-    queryFn: api.investigations,
-  });
-
+  const list = useQuery({ queryKey: ["investigations"], queryFn: api.investigations });
   const lenses = useQuery({ queryKey: ["lenses"], queryFn: api.lenses });
-
   const detail = useQuery({
     queryKey: ["investigation", selectedId],
     queryFn: () => api.investigation(selectedId!),
@@ -58,111 +62,97 @@ export function Investigations() {
   });
 
   const items = list.data?.items ?? [];
+  // Open the most recent case by default: an empty right pane is a dead end.
+  useEffect(() => {
+    if (selectedId === null && items.length > 0) setSelectedId(items[0].id);
+  }, [items, selectedId]);
 
   return (
-    <div className="max-w-[1840px] mx-auto px-8">
+    <div className="mx-auto max-w-[1440px] px-4 pb-24 sm:px-8">
       <SectionDivider
-        index="04"
         label="Investigations"
-        trailing={
-          list.isLoading
-            ? "loading…"
-            : `${items.length} saved · click to inspect`
-        }
+        trailing={list.isLoading ? "Loading…" : `${items.length} saved`}
       />
 
-      <div className="grid grid-cols-12 gap-6">
+      <div className="grid grid-cols-12 gap-x-10 gap-y-8">
         <aside className="col-span-12 lg:col-span-4">
-          <div className="mb-3 flex items-center justify-between font-mono text-[10px] tracking-[0.2em] text-text-muted">
-            <span>SAVED</span>
-            <button
-              onClick={() => setCreating((v) => !v)}
-              className={`px-2 py-1 border transition-colors ${
-                creating
-                  ? "border-accent text-accent"
-                  : "border-border-soft hover:border-accent hover:text-accent"
-              }`}
-            >
-              [ {creating ? "CANCEL" : "+ NEW"} ]
+          <div className="mb-3 flex items-center justify-between">
+            <h3 className="m-0 text-sm font-bold">Case files</h3>
+            <button onClick={() => setCreating((v) => !v)} className={creating ? btn : btnPrimary}>
+              {creating ? "Cancel" : "New investigation"}
             </button>
           </div>
 
-          <AnimatePresence>
-            {creating && (
-              <motion.div
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: "auto" }}
-                exit={{ opacity: 0, height: 0 }}
-                transition={{ duration: 0.2 }}
-                className="overflow-hidden mb-3"
-              >
-                <CreateForm
-                  lenses={lenses.data?.items ?? []}
-                  onClose={() => setCreating(false)}
-                  onCreated={(inv) => {
-                    qc.invalidateQueries({ queryKey: ["investigations"] });
-                    setSelectedId(inv.id);
-                    setCreating(false);
-                  }}
-                />
-              </motion.div>
-            )}
-          </AnimatePresence>
+          {creating && (
+            <CreateForm
+              lenses={lenses.data?.items ?? []}
+              onCreated={(inv) => {
+                qc.invalidateQueries({ queryKey: ["investigations"] });
+                setSelectedId(inv.id);
+                setCreating(false);
+              }}
+            />
+          )}
 
-          <ul className="space-y-2">
-            {items.map((inv) => (
-              <li key={inv.id}>
-                <button
-                  onClick={() => setSelectedId(inv.id)}
-                  className={`w-full text-left border px-3 py-2.5 transition-colors ${
-                    selectedId === inv.id
-                      ? "border-accent bg-accent/5"
-                      : "border-border-soft hover:border-text-muted"
-                  }`}
-                >
-                  <div className="flex items-baseline gap-2">
-                    <span className="font-mono text-[10px] text-text-muted">
-                      #{inv.id}
-                    </span>
-                    <span className="font-display text-sm truncate">
-                      {inv.name}
-                    </span>
-                    <span className="ml-auto font-mono text-[10px] text-accent tracking-[0.15em]">
-                      {inv.lens?.toUpperCase() ?? "—"}
-                    </span>
-                  </div>
-                  {inv.description && (
-                    <div className="mt-1 text-[11px] text-text-muted line-clamp-2">
-                      {inv.description}
+          {list.isError && (
+            <QueryError what="investigations" error={list.error} onRetry={() => list.refetch()} />
+          )}
+
+          <ul className="m-0 list-none p-0">
+            {items.map((inv) => {
+              const active = selectedId === inv.id;
+              return (
+                <li key={inv.id}>
+                  <button
+                    onClick={() => setSelectedId(inv.id)}
+                    aria-current={active}
+                    className={`w-full border-t py-3 pl-3 text-left ${
+                      active
+                        ? "border-t-rule bg-surface-1 shadow-[inset_3px_0_0_var(--color-accent)]"
+                        : "border-t-border-soft hover:bg-surface-1"
+                    }`}
+                  >
+                    <div className="flex items-baseline gap-2 pr-3">
+                      <span className="font-mono text-xs text-text-muted">#{inv.id}</span>
+                      <span className="truncate text-sm font-semibold">{inv.name}</span>
+                      <span className="ml-auto whitespace-nowrap text-xs text-text-muted">
+                        {lensLabel(inv.lens, lenses.data?.items)}
+                      </span>
                     </div>
-                  )}
-                </button>
-              </li>
-            ))}
-            {!list.isLoading && items.length === 0 && (
-              <li className="font-mono text-xs text-text-muted opacity-60 italic">
-                no investigations yet — start one with [+ NEW]
+                    {inv.description && (
+                      <div className="mt-1 line-clamp-2 pr-3 text-xs text-text-muted">{inv.description}</div>
+                    )}
+                  </button>
+                </li>
+              );
+            })}
+            {!list.isLoading && !list.isError && items.length === 0 && (
+              <li className="border-t border-border-soft py-4 text-sm text-text-muted">
+                No investigations yet. Create one to save a filter and get a cited lens summary.
               </li>
             )}
           </ul>
         </aside>
 
         <section className="col-span-12 lg:col-span-8">
-          {selectedId === null && (
-            <div className="border border-dashed border-border-soft p-8 font-mono text-xs text-text-muted">
-              select an investigation on the left to view its lens summary.
+          {selectedId === null ? (
+            <div className="border border-dashed border-border-soft p-8 text-sm text-text-muted">
+              Select a case file to read its lens summary. Every <span className="font-mono">[#id]</span> in
+              the summary opens the post it cites.
             </div>
-          )}
-
-          {selectedId !== null && (
+          ) : detail.isError ? (
+            <QueryError what="this investigation" error={detail.error} onRetry={() => detail.refetch()} />
+          ) : (
             <InvestigationDetail
               loading={detail.isLoading}
               data={detail.data ?? null}
+              lenses={lenses.data?.items}
               onSelectPost={setPostId}
               onRerun={() => rerun.mutate(selectedId)}
               rerunLoading={rerun.isPending}
+              rerunError={rerun.error}
               onDelete={() => {
-                if (confirm("delete this investigation?"))
+                if (confirm("Delete this investigation? Its saved filter and summary will be removed."))
                   remove.mutate(selectedId);
               }}
             />
@@ -171,182 +161,150 @@ export function Investigations() {
       </div>
 
       <DetailPanel id={postId} onClose={() => setPostId(null)} />
-
-      <div className="h-32" />
     </div>
   );
+}
+
+function lensLabel(name: string | null, lenses: Lens[] | undefined): string {
+  if (!name) return "No lens";
+  return lenses?.find((l) => l.name === name)?.label ?? name;
 }
 
 function InvestigationDetail({
   loading,
   data,
+  lenses,
   onSelectPost,
   onRerun,
   rerunLoading,
+  rerunError,
   onDelete,
 }: {
   loading: boolean;
   data: Investigation | null;
+  lenses: Lens[] | undefined;
   onSelectPost: (id: number) => void;
   onRerun: () => void;
   rerunLoading: boolean;
+  rerunError: Error | null;
   onDelete: () => void;
 }) {
-  if (loading || !data)
-    return <div className="font-mono text-xs text-text-muted">loading…</div>;
-
+  // Hooks before any early return (rules of hooks).
   const filterEntries = useMemo(
-    () =>
-      Object.entries(data.filters).filter(
-        ([, v]) => v !== null && v !== undefined && v !== "",
-      ),
-    [data.filters],
+    () => Object.entries(data?.filters ?? {}).filter(([, v]) => v !== null && v !== undefined && v !== ""),
+    [data?.filters],
   );
 
+  if (loading || !data) return <p className="text-sm text-text-muted">Loading case file…</p>;
+
   return (
-    <article className="border border-border-soft bg-surface-1/30 backdrop-blur-sm">
-      <header className="px-5 py-4 border-b border-border-soft flex items-baseline gap-3">
-        <span className="font-mono text-[10px] text-text-muted">
-          #{data.id}
-        </span>
-        <h2 className="font-display text-lg leading-tight">{data.name}</h2>
-        <span className="ml-auto font-mono text-[10px] text-accent tracking-[0.18em]">
-          {data.lens?.toUpperCase() ?? "NO LENS"}
-        </span>
+    <article className="border-t-2 border-rule">
+      <header className="flex flex-wrap items-baseline gap-x-3 gap-y-1 py-4">
+        <span className="font-mono text-sm text-text-muted">#{data.id}</span>
+        <h2 className="m-0 text-2xl font-extrabold leading-tight tracking-[-0.02em]">{data.name}</h2>
+        <span className="ml-auto text-sm text-text-muted">{lensLabel(data.lens, lenses)} lens</span>
       </header>
 
-      <div className="px-5 py-4 space-y-5">
-        {data.description && (
-          <p className="text-sm text-text-muted leading-relaxed">
-            {data.description}
-          </p>
-        )}
+      {data.description && <p className="m-0 mb-4 max-w-[70ch] text-sm text-text-muted">{data.description}</p>}
 
+      <div className="flex flex-wrap gap-2 pb-6">
+        <button onClick={onRerun} disabled={rerunLoading || !data.lens} className={btnPrimary}
+          title={data.lens ? "Ask the local LLM to rewrite the summary over the current matches" : "Set a lens first"}>
+          {rerunLoading ? "Running lens…" : data.summary ? "Rerun summary" : "Generate summary"}
+        </button>
+        <Link to={`/investigations/${data.id}/graph`} className={btn}>Case graph</Link>
+        <a href={api.exportInvestigationUrl(data.id)} target="_blank" rel="noreferrer" className={btn}>
+          Export PDF
+        </a>
+        <button onClick={onDelete} className="ml-auto px-3 py-1.5 text-sm font-semibold text-danger underline">
+          Delete
+        </button>
+      </div>
+
+      <div className="space-y-8">
         <section>
-          <SectionLabel>FILTERS</SectionLabel>
-          {filterEntries.length === 0 ? (
-            <div className="font-mono text-[11px] text-text-muted opacity-60">
-              none — matches every post
-            </div>
-          ) : (
-            <div className="flex flex-wrap gap-1.5">
-              {filterEntries.map(([k, v]) => (
-                <span
-                  key={k}
-                  className="font-mono text-[11px] border border-border-soft px-2 py-0.5"
-                >
-                  <span className="text-text-muted">{k}:</span>{" "}
-                  <span className="text-accent">{String(v)}</span>
+          <SectionLabel>Filter</SectionLabel>
+          <p className="m-0 text-sm">
+            {filterEntries.length === 0 ? (
+              <span className="text-text-muted">No filter: matches every post.</span>
+            ) : (
+              filterEntries.map(([k, v], i) => (
+                <span key={k}>
+                  {i > 0 && <span className="text-text-muted"> and </span>}
+                  <span className="text-text-muted">{k}</span> = <span className="font-mono font-semibold">{String(v)}</span>
                 </span>
-              ))}
-            </div>
-          )}
-          <div className="mt-2 font-mono text-[10px] text-text-muted">
-            matched: {data.matched_total ?? 0} posts
-          </div>
+              ))
+            )}
+            <span className="ml-3 text-text-muted tabular-nums">{data.matched_total ?? 0} posts match now</span>
+          </p>
         </section>
 
         <section>
-          <div className="flex items-center justify-between mb-2">
-            <SectionLabel>LENS SUMMARY</SectionLabel>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={onRerun}
-                disabled={rerunLoading || !data.lens}
-                className="font-mono text-[10px] tracking-[0.2em] border border-border-soft px-2 py-1 hover:text-accent hover:border-accent disabled:opacity-30 transition-colors"
-                title={data.lens ? "re-run the lens summary" : "no lens set"}
-              >
-                [ {rerunLoading ? "RUNNING…" : "RERUN"} ]
-              </button>
-              <Link
-                to={`/investigations/${data.id}/graph`}
-                className="font-mono text-[10px] tracking-[0.2em] border border-border-soft px-2 py-1 hover:text-accent hover:border-accent transition-colors"
-                title="view the case-file graph (posts + IOCs + MITRE)"
-              >
-                [ CASE GRAPH ]
-              </Link>
-              <a
-                href={api.exportInvestigationUrl(data.id)}
-                target="_blank"
-                rel="noreferrer"
-                className="font-mono text-[10px] tracking-[0.2em] border border-border-soft px-2 py-1 hover:text-accent hover:border-accent transition-colors"
-                title="download a styled PDF of this investigation"
-              >
-                [ EXPORT PDF ]
-              </a>
-              <button
-                onClick={onDelete}
-                className="font-mono text-[10px] tracking-[0.2em] border border-border-soft px-2 py-1 hover:text-danger hover:border-danger transition-colors"
-              >
-                [ DELETE ]
-              </button>
+          <SectionLabel>Lens summary</SectionLabel>
+          {rerunError && (
+            <div className="mb-3">
+              <QueryError what="a new summary" error={rerunError} />
+              <p className="m-0 mt-1 text-xs text-text-muted">The lens runs on the local LLM; it needs Ollama running.</p>
             </div>
-          </div>
-
+          )}
           {data.summary ? (
-            <div className="text-sm leading-relaxed whitespace-pre-wrap text-text/90 bg-surface-1/40 border border-border-soft p-4">
+            <div className="max-w-[75ch] whitespace-pre-wrap border-l-2 border-rule bg-surface-1 py-4 pr-5 pl-5 text-[15px] leading-relaxed">
               <CitationText text={data.summary} onSelect={onSelectPost} />
             </div>
           ) : (
-            <div className="font-mono text-[11px] text-text-muted opacity-60">
-              not yet run — hit [ RERUN ] to generate.
-            </div>
+            <p className="m-0 text-sm text-text-muted">
+              No summary yet. Generate one to get a single report over the matched posts, with every claim cited.
+            </p>
           )}
-
           {data.last_run_at && (
-            <div className="mt-2 font-mono text-[10px] text-text-muted">
-              last run:{" "}
-              {new Date(data.last_run_at * 1000)
-                .toISOString()
-                .replace("T", " ")
-                .slice(0, 19)}{" "}
-              · model: {data.summary_model ?? "—"} · over{" "}
-              {data.summary_post_ids.length} posts
-            </div>
+            <p className="m-0 mt-2 text-xs text-text-muted tabular-nums">
+              Written {new Date(data.last_run_at * 1000).toISOString().replace("T", " ").slice(0, 16)} UTC by{" "}
+              {data.summary_model ?? "—"} over {data.summary_post_ids.length} posts.
+            </p>
           )}
         </section>
 
+        {data.matched_posts && data.matched_posts.length > 0 && (
+          <section>
+            <SectionLabel>Evidence graph</SectionLabel>
+            <InlineGraph ids={data.matched_posts.slice(0, 15).map((p) => p.id)} onSelectPost={onSelectPost} />
+            <Link to={`/investigations/${data.id}/graph`} className="mt-2 inline-block text-sm font-semibold text-accent underline">
+              Open full-screen graph ({Math.min(data.matched_total ?? 0, 25)} posts)
+            </Link>
+          </section>
+        )}
+
         {data.mitigations && data.mitigations.length > 0 && (
           <section>
-            <SectionLabel>
-              PRIORITY MITIGATIONS ({data.mitigations.length})
-            </SectionLabel>
-            <p className="font-mono text-[10px] text-text-muted mb-2 leading-relaxed">
-              MITRE ATT&amp;CK countermeasures ranked by how many matched posts
-              each one defends — act on the top of the list first.
+            <SectionLabel>Priority mitigations</SectionLabel>
+            <p className="m-0 mb-3 max-w-[70ch] text-sm text-text-muted">
+              Official MITRE ATT&amp;CK countermeasures, ranked by how many matched posts each one defends.
+              Pure lookup, no LLM.
             </p>
-            <ul className="space-y-1.5">
+            <ol className="m-0 list-none p-0">
               {data.mitigations.slice(0, 12).map((m) => (
                 <MitigationRow key={m.mitigation_id} m={m} />
               ))}
-            </ul>
+            </ol>
           </section>
         )}
 
         {data.matched_posts && data.matched_posts.length > 0 && (
           <section>
-            <SectionLabel>MATCHED POSTS ({data.matched_posts.length})</SectionLabel>
-            <ul className="space-y-1 font-mono text-xs">
+            <SectionLabel>Matched posts ({data.matched_posts.length})</SectionLabel>
+            <ul className="m-0 list-none p-0 text-sm">
               {data.matched_posts.slice(0, 25).map((p) => (
                 <li key={p.id}>
-                  <button
-                    onClick={() => onSelectPost(p.id)}
-                    className="w-full text-left px-2 py-1.5 border border-transparent hover:border-accent hover:bg-accent/5 transition-colors"
-                  >
-                    <div className="flex items-baseline gap-2">
-                      <span className="text-accent">#{p.id}</span>
-                      <span className="text-text-muted text-[10px]">
-                        {p.category}
+                  <button onClick={() => onSelectPost(p.id)}
+                    className="flex w-full items-baseline gap-3 border-t border-border-soft py-2 text-left hover:bg-surface-1">
+                    <span className="w-12 font-mono text-text-muted">#{p.id}</span>
+                    <span className="min-w-0 flex-1 truncate font-semibold">{p.thread_title}</span>
+                    <span className="text-xs text-text-muted">{p.category}</span>
+                    {p.intent && (
+                      <span className="w-24 text-right text-xs font-semibold" style={{ color: intentColor(p.intent) }}>
+                        {p.intent}
                       </span>
-                      {p.intent && (
-                        <span className="ml-auto text-warn text-[10px]">
-                          {p.intent}
-                        </span>
-                      )}
-                    </div>
-                    <div className="text-text truncate mt-0.5">
-                      {p.thread_title}
-                    </div>
+                    )}
                   </button>
                 </li>
               ))}
@@ -358,15 +316,19 @@ function InvestigationDetail({
   );
 }
 
-function CreateForm({
-  lenses,
-  onClose,
-  onCreated,
-}: {
-  lenses: Lens[];
-  onClose: () => void;
-  onCreated: (inv: Investigation) => void;
-}) {
+function InlineGraph({ ids, onSelectPost }: { ids: number[]; onSelectPost: (id: number) => void }) {
+  const qs = useQueries({ queries: ids.map((id) => ({ queryKey: ["post", id], queryFn: () => api.post(id) })) });
+  const posts = qs.map((q) => q.data).filter((p): p is PostDetail => !!p);
+  if (qs.some((q) => q.isLoading))
+    return <div className="grid h-80 place-items-center border border-dashed border-border-soft text-sm text-text-muted">Drawing the evidence…</div>;
+  return (
+    <Suspense fallback={<div className="route-loading" />}>
+      <EvidenceGraph posts={posts} onSelectPost={onSelectPost} height={460} />
+    </Suspense>
+  );
+}
+
+function CreateForm({ lenses, onCreated }: { lenses: Lens[]; onCreated: (inv: Investigation) => void }) {
   const [name, setName] = useState("");
   const [lens, setLens] = useState<string>(lenses[0]?.name ?? "");
   const [intent, setIntent] = useState("");
@@ -378,119 +340,92 @@ function CreateForm({
       const filters: Record<string, unknown> = {};
       if (intent) filters.intent = intent;
       if (q) filters.q = q;
-      return api.createInvestigation({
-        name: name.trim(),
-        filters,
-        lens: lens || undefined,
-      });
+      return api.createInvestigation({ name: name.trim(), filters, lens: lens || undefined });
     },
     onSuccess: onCreated,
     onError: (e: Error) => setError(e.message),
   });
 
+  const input =
+    "w-full border border-border-soft bg-surface-1 px-2.5 py-2 text-sm focus:border-text focus:outline-none";
+
   return (
-    <div className="border border-accent/50 bg-accent/5 p-3 space-y-3">
-      <input
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        placeholder="investigation name"
-        className="w-full bg-base/60 border border-border-soft px-2 py-1.5 font-mono text-xs focus:border-accent outline-none"
-      />
-      <div>
-        <div className="font-mono text-[10px] tracking-[0.2em] text-text-muted mb-1">
-          LENS
-        </div>
-        <div className="flex flex-wrap gap-1">
+    <form
+      className="mb-4 space-y-3 border border-text bg-surface-1 p-4"
+      onSubmit={(e) => {
+        e.preventDefault();
+        setError(null);
+        if (!name.trim()) {
+          setError("Give the investigation a name.");
+          return;
+        }
+        create.mutate();
+      }}
+    >
+      <label className="block">
+        <span className="mb-1 block text-xs font-semibold">Name</span>
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Healthcare access sales" className={input} />
+      </label>
+      <fieldset className="m-0 border-0 p-0">
+        <legend className="mb-1 text-xs font-semibold">Lens</legend>
+        <div className="flex flex-wrap gap-1.5">
           {lenses.map((l) => (
-            <button
-              key={l.name}
-              onClick={() => setLens(l.name)}
-              className={`font-mono text-[10px] tracking-[0.15em] px-2 py-1 border transition-colors ${
-                lens === l.name
-                  ? "border-accent text-accent bg-accent/10"
-                  : "border-border-soft text-text-muted hover:text-text"
-              }`}
+            <button type="button" key={l.name} onClick={() => setLens(l.name)} aria-pressed={lens === l.name}
               title={l.description}
-            >
-              {l.label.toUpperCase()}
+              className={`border px-2.5 py-1 text-xs font-semibold ${
+                lens === l.name ? "border-text bg-text text-surface-1" : "border-border-soft text-text-muted hover:text-text"
+              }`}>
+              {l.label}
             </button>
           ))}
         </div>
-      </div>
+      </fieldset>
       <div className="grid grid-cols-2 gap-2">
-        <input
-          value={intent}
-          onChange={(e) => setIntent(e.target.value)}
-          placeholder="intent (optional)"
-          className="bg-base/60 border border-border-soft px-2 py-1.5 font-mono text-xs focus:border-accent outline-none"
-        />
-        <input
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="keyword (optional)"
-          className="bg-base/60 border border-border-soft px-2 py-1.5 font-mono text-xs focus:border-accent outline-none"
-        />
+        <label className="block">
+          <span className="mb-1 block text-xs font-semibold">Intent <span className="font-normal text-text-muted">optional</span></span>
+          <select value={intent} onChange={(e) => setIntent(e.target.value)} className={input}>
+            <option value="">Any</option>
+            {["sale", "recruitment", "how-to", "doxxing", "discussion", "other"].map((i) => (
+              <option key={i} value={i}>{i}</option>
+            ))}
+          </select>
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-xs font-semibold">Keyword <span className="font-normal text-text-muted">optional</span></span>
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="e.g. VPN" className={input} />
+        </label>
       </div>
-      {error && (
-        <div className="font-mono text-[10px] text-danger">{error}</div>
-      )}
-      <div className="flex justify-end gap-2">
-        <button
-          onClick={onClose}
-          className="font-mono text-[10px] tracking-[0.2em] border border-border-soft px-2 py-1 hover:text-text transition-colors"
-        >
-          [ CANCEL ]
-        </button>
-        <button
-          onClick={() => {
-            setError(null);
-            if (!name.trim()) {
-              setError("name required");
-              return;
-            }
-            create.mutate();
-          }}
-          disabled={create.isPending}
-          className="font-mono text-[10px] tracking-[0.2em] border border-accent text-accent px-2 py-1 hover:bg-accent/10 disabled:opacity-30 transition-colors"
-        >
-          [ {create.isPending ? "CREATING…" : "CREATE"} ]
+      {error && <p role="alert" className="m-0 text-sm font-semibold text-danger">{error}</p>}
+      <div className="flex justify-end">
+        <button type="submit" disabled={create.isPending} className={btnPrimary}>
+          {create.isPending ? "Creating…" : "Create investigation"}
         </button>
       </div>
-    </div>
+    </form>
   );
 }
 
 function MitigationRow({ m }: { m: InvestigationMitigation }) {
   const pct = Math.round(m.post_share * 100);
   return (
-    <li className="border border-border-soft bg-surface-1/30 px-3 py-2">
-      <div className="flex items-baseline gap-2 font-mono text-xs">
-        <span className="text-emerald-400">{m.mitigation_id}</span>
-        <span className="text-text">{m.name}</span>
-        <span className="ml-auto text-[10px] text-text-muted whitespace-nowrap">
-          {m.posts_covered} posts · {pct}%
-        </span>
+    <li className="grid grid-cols-[4.5rem_1fr_auto] items-baseline gap-x-3 border-t border-border-soft py-2 text-sm">
+      <span className="font-mono text-ok">{m.mitigation_id}</span>
+      <span className="font-semibold">{m.name}</span>
+      <span className="whitespace-nowrap text-xs text-text-muted tabular-nums">
+        {m.posts_covered} posts · {pct}%
+      </span>
+      <span />
+      <div className="col-span-2 mt-1 h-1.5 bg-surface-2">
+        <div className="h-full bg-ok" style={{ width: `${pct}%` }} />
       </div>
-      <div className="mt-1.5 h-1 bg-base/60 overflow-hidden">
-        <div
-          className="h-full bg-emerald-400/70"
-          style={{ width: `${pct}%` }}
-        />
-      </div>
-      <div
-        className="mt-1 font-mono text-[10px] text-text-muted truncate"
-        title={m.techniques.join(", ")}
-      >
-        counters: {m.techniques.join(" ")}
-      </div>
+      <span />
+      <span className="col-span-2 mt-1 truncate text-xs text-text-muted" title={m.techniques.join(", ")}>
+        Counters <span className="font-mono">{m.techniques.join(" ")}</span>
+      </span>
     </li>
   );
 }
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="font-mono text-[10px] tracking-[0.2em] text-text-muted mb-2">
-      {children}
-    </div>
-  );
+  return <h3 className="m-0 mb-3 text-sm font-bold">{children}</h3>;
 }

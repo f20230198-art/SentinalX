@@ -1,12 +1,27 @@
-import { useQuery } from "@tanstack/react-query";
-import { motion } from "framer-motion";
+import { lazy, Suspense, useState } from "react";
+import { Link } from "react-router-dom";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { api } from "../lib/api";
-import { useScramble } from "../hooks/useScramble";
+import { api, type HealthFull, type PostDetail, type Stats } from "../lib/api";
 import { SectionDivider } from "../components/Shell";
+import { DetailPanel } from "../components/DetailPanel";
+import {
+  ProvenanceBar,
+  ProvenanceLegend,
+  QueryError,
+} from "../components/Evidence";
+import { intentColor } from "../lib/palette";
+
+// d3-force only loads when the evidence web scrolls into the page.
+const EvidenceGraph = lazy(() =>
+  import("../components/EvidenceGraph").then((m) => ({ default: m.EvidenceGraph })),
+);
+
+const fmt = (n: number | undefined) => (n === undefined ? "—" : n.toLocaleString());
 
 export function Home() {
   const { t } = useTranslation();
+  const [openPost, setOpenPost] = useState<number | null>(null);
   const stats = useQuery({ queryKey: ["stats"], queryFn: api.stats });
   const health = useQuery({
     queryKey: ["healthz", "full"],
@@ -15,279 +30,339 @@ export function Home() {
   });
 
   return (
-    <div className="max-w-[1440px] mx-auto px-8">
-      <Hero
-        posts={stats.data?.posts_total ?? 0}
-        techniques={stats.data?.post_techniques_total ?? 0}
-        iocs={stats.data?.iocs_total ?? 0}
-        loading={stats.isLoading}
-      />
+    <div className="mx-auto max-w-[1440px] px-4 pb-24 sm:px-8">
+      {stats.isError ? (
+        <div className="pt-10">
+          <QueryError what="corpus statistics" error={stats.error} onRetry={() => stats.refetch()} />
+        </div>
+      ) : (
+        <Finding stats={stats.data} onCite={setOpenPost} />
+      )}
+
+      {stats.data && stats.data.top_techniques[0] && (
+        <EvidenceWeb techniqueId={stats.data.top_techniques[0].technique_id} onOpen={setOpenPost} />
+      )}
+
+      <SectionDivider label={t("home.sectionStatus")} trailing={t("home.statusMeta")} />
+      {health.isError ? (
+        <QueryError what="system status" error={health.error} onRetry={() => health.refetch()} />
+      ) : (
+        <StatusTable data={health.data} loading={health.isLoading} />
+      )}
 
       <SectionDivider
-        index="02"
-        label={t("home.sectionStatus")}
-        trailing={
-          health.data
-            ? t("home.health", { status: health.data.status.toUpperCase() })
-            : t("common.checking")
-        }
-      />
-      <HealthGrid data={health.data} loading={health.isLoading} />
-
-      <SectionDivider
-        index="03"
         label={t("home.sectionFeed")}
-        trailing={
-          stats.data
-            ? t("home.postsIndexed", { count: stats.data.posts_total })
-            : ""
-        }
+        trailing={stats.data ? t("home.postsIndexed", { count: stats.data.posts_total }) : ""}
       />
-      <FeedTeaser />
+      <LatestPosts onOpen={setOpenPost} />
 
-      <SectionDivider
-        index="04"
-        label={t("home.sectionMitre")}
-        trailing={t("home.topTechniques")}
-      />
-      <TopTechniques data={stats.data?.top_techniques ?? []} />
+      <SectionDivider label={t("home.sectionMitre")} trailing={t("home.topTechniques")} />
+      {stats.data && <TopTechniques data={stats.data.top_techniques} />}
 
-      <div className="h-32" />
+      <DetailPanel id={openPost} onClose={() => setOpenPost(null)} />
     </div>
   );
 }
 
-function Hero({
-  posts,
-  techniques,
-  iocs,
-  loading,
-}: {
-  posts: number;
-  techniques: number;
-  iocs: number;
-  loading: boolean;
-}) {
+/* ----------------------------------------------------------------------- *
+ * The opening: one real, cited finding — not a wall of counters.
+ * Left: the claim, its provenance, and the posts that prove it.
+ * Right: the chain of custody that produced it.
+ * ----------------------------------------------------------------------- */
+function Finding({ stats, onCite }: { stats: Stats | undefined; onCite: (id: number) => void }) {
   const { t } = useTranslation();
-  // useScramble keys on its target — switching language changes the string and
-  // re-runs the decryption animation for the localized title.
-  const title = useScramble(t("home.heroTitle"));
+  const top = stats?.top_techniques[0];
+  const detail = useQuery({
+    queryKey: ["technique", top?.technique_id],
+    queryFn: () => api.technique(top!.technique_id),
+    enabled: !!top,
+  });
+  const cited = [...new Set((detail.data?.posts ?? []).map((p) => p.raw_post_id))].slice(0, 8);
+
   return (
-    <section className="hero-gradient relative pt-24 pb-20 px-2 -mx-8 mb-4">
-      <div className="max-w-[1440px] mx-auto px-8 grid grid-cols-12 gap-6">
-        <div className="col-span-12 md:col-span-8">
-          <div className="font-mono text-xs tracking-[0.3em] text-accent mb-6">
-            [01] // {t("nav.console")}
+    <section className="grid gap-x-12 gap-y-10 pt-10 pb-4 lg:grid-cols-12 lg:pt-16">
+      <div className="lg:col-span-8">
+        <h1 className="m-0 max-w-[18ch] text-4xl font-extrabold leading-[1.02] tracking-[-0.035em] sm:text-6xl">
+          {top ? (
+            <>
+              <span className="text-accent">{top.name ?? top.technique_id}</span>{" "}
+              {t("home.findingHeadline", {
+                count: top.n,
+                total: stats?.posts_total ?? 0,
+              })}
+            </>
+          ) : (
+            <span className="text-text-muted">{t("home.findingLoading")}</span>
+          )}
+        </h1>
+
+        {top && (
+          <div className="mt-8 max-w-[62ch]">
+            <p className="m-0 text-base text-text-muted">
+              <span className="font-mono text-text">{top.technique_id}</span> ·{" "}
+              {t("home.findingProvenance", {
+                verified: top.verified,
+                semantic: top.semantic,
+                unverified: top.unverified,
+              })}
+            </p>
+            <div className="mt-4">
+              <ProvenanceBar
+                verified={top.verified}
+                semantic={top.semantic}
+                unverified={top.unverified}
+                max={top.n}
+              />
+            </div>
+            <div className="mt-6 flex flex-wrap items-center gap-2">
+              <span className="mr-1 text-sm font-semibold">{t("home.evidence")}</span>
+              {cited.map((id) => (
+                <button
+                  key={id}
+                  onClick={() => onCite(id)}
+                  className="border border-text px-2 py-0.5 font-mono text-sm hover:bg-text hover:text-surface-1"
+                  title={t("home.openPost", { id })}
+                >
+                  #{id}
+                </button>
+              ))}
+              <Link
+                to="/techniques"
+                className="ml-2 text-sm font-semibold text-accent underline hover:text-accent-strong"
+              >
+                {t("home.seeAllTechniques")}
+              </Link>
+            </div>
           </div>
-          <h1 className="font-display text-5xl md:text-7xl font-semibold leading-[1.05] tracking-tight">
-            <span className="scramble">{title}</span>
-          </h1>
-          <p className="mt-6 max-w-2xl text-text-muted leading-relaxed">
-            {t("home.heroBody")}
-          </p>
-        </div>
-        <div className="col-span-12 md:col-span-4 flex flex-col gap-4 justify-end">
-          <Stat label={t("home.statPosts")} value={posts} loading={loading} />
-          <Stat
-            label={t("home.statTechniques")}
-            value={techniques}
-            loading={loading}
-          />
-          <Stat label={t("home.statIocs")} value={iocs} loading={loading} />
-        </div>
+        )}
       </div>
+
+      <aside className="lg:col-span-4" aria-label={t("home.custodyTitle")}>
+        <h2 className="m-0 text-sm font-bold">{t("home.custodyTitle")}</h2>
+        <ol className="m-0 mt-3 list-none p-0">
+          {[
+            [t("home.custodyScraped"), stats?.posts_total],
+            [t("home.custodyIocs"), stats?.iocs_total],
+            [t("home.custodyLlm"), stats?.posts_llm_analysed],
+            [t("home.custodyMapped"), stats?.post_techniques_total],
+            [t("home.custodyCorpus"), stats?.techniques_corpus],
+          ].map(([label, n], i) => (
+            <li
+              key={i}
+              className="flex items-baseline justify-between gap-4 border-t border-border-soft py-2.5 text-sm"
+            >
+              <span className="text-text-muted">{label}</span>
+              <span className="tabular-nums font-semibold">{fmt(n as number | undefined)}</span>
+            </li>
+          ))}
+        </ol>
+        <p className="m-0 mt-3 text-xs leading-relaxed text-text-muted">{t("home.custodyNote")}</p>
+      </aside>
     </section>
   );
 }
 
-function Stat({
-  label,
-  value,
-  loading,
-}: {
-  label: string;
-  value: number;
-  loading: boolean;
-}) {
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.4 }}
-      className="border border-border-soft border-l-2 border-l-accent bg-surface-1/70 backdrop-blur-sm px-5 py-4 hover:border-accent/60 transition-colors"
-      style={{ boxShadow: "inset 0 0 24px rgba(167,139,250,0.08)" }}
-    >
-      <div className="font-mono text-[10px] tracking-[0.2em] text-text-muted">
-        {label}
-      </div>
-      <div className="font-display text-3xl mt-1 tabular-nums text-text">
-        {loading ? "—" : value.toLocaleString()}
-      </div>
-    </motion.div>
-  );
-}
-
-function HealthGrid({
-  data,
-  loading,
-}: {
-  data: import("../lib/api").HealthFull | undefined;
-  loading: boolean;
-}) {
+/* ----------------------------------------------------------------------- *
+ * System status. Only the database is fatal; the LLM and Tor being offline
+ * means the console serves already-enriched data — said calmly, in amber.
+ * ----------------------------------------------------------------------- */
+function StatusTable({ data, loading }: { data: HealthFull | undefined; loading: boolean }) {
   const { t } = useTranslation();
-  const ORDER: { key: string; tint: string }[] = [
-    { key: "db", tint: "rgb(167,139,250)" },
-    { key: "ollama", tint: "rgb(110,231,183)" },
-    { key: "tor_socks", tint: "rgb(125,211,252)" },
-    { key: "pipeline", tint: "rgb(232,163,61)" },
+  const rows: { key: string; label: string; fatal: boolean; offlineNote: string }[] = [
+    { key: "db", label: t("home.svcDb"), fatal: true, offlineNote: t("home.svcDbDown") },
+    { key: "ollama", label: t("home.svcLlm"), fatal: false, offlineNote: t("home.svcLlmOffline") },
+    { key: "tor_socks", label: t("home.svcTor"), fatal: false, offlineNote: t("home.svcTorOffline") },
   ];
+  const pipe = data?.checks.pipeline;
+  const pending =
+    Number(pipe?.pending_extraction ?? 0) + Number(pipe?.pending_llm ?? 0) + Number(pipe?.pending_mitre ?? 0);
+
   return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-      {ORDER.map(({ key: k, tint }) => {
-        const c = data?.checks[k];
-        const up = c?.status === "up";
-        return (
-          <div
-            key={k}
-            className="border border-border-soft bg-surface-1/60 backdrop-blur-sm px-4 py-4 transition-colors hover:bg-surface-1/80"
-            style={{
-              borderLeft: `2px solid ${up ? tint : "rgba(229,72,77,0.7)"}`,
-              boxShadow: up ? `inset 0 0 18px ${tint}1a` : undefined,
-            }}
-          >
-            <div className="flex items-center gap-2 mb-2">
-              <span
-                className={`inline-block w-1.5 h-1.5 rounded-full ${
-                  loading
-                    ? "bg-text-muted animate-pulse"
-                    : up
-                    ? ""
-                    : "bg-danger"
-                }`}
-                style={
-                  up
-                    ? {
-                        backgroundColor: tint,
-                        boxShadow: `0 0 6px ${tint}`,
-                      }
-                    : undefined
-                }
-              />
-              <span className="font-mono text-[10px] tracking-[0.2em] text-text-muted uppercase">
-                {k}
-              </span>
-            </div>
-            <div
-              className="font-mono text-sm"
-              style={{ color: up ? tint : undefined }}
+    <table className="w-full border-collapse text-sm">
+      <tbody>
+        {rows.map((r) => {
+          const c = data?.checks[r.key];
+          const up = c?.status === "up";
+          const state = loading ? "checking" : up ? "online" : r.fatal ? "down" : "cached";
+          return (
+            <tr key={r.key} className="border-t border-border-soft align-baseline">
+              <th scope="row" className="w-48 py-3 pr-4 text-left font-semibold">
+                {r.label}
+              </th>
+              <td className="w-56 py-3 pr-4">
+                <StatusWord state={state} />
+              </td>
+              <td className="py-3 text-text-muted">
+                {state === "online" && c?.latency_ms !== undefined && (
+                  <span className="tabular-nums">{c.latency_ms} ms</span>
+                )}
+                {(state === "cached" || state === "down") && r.offlineNote}
+              </td>
+            </tr>
+          );
+        })}
+        <tr className="border-t border-border-soft align-baseline">
+          <th scope="row" className="py-3 pr-4 text-left font-semibold">
+            {t("home.svcQueue")}
+          </th>
+          <td className="py-3 pr-4">
+            <StatusWord state={loading ? "checking" : pending ? "busy" : "idle"} />
+          </td>
+          <td className="py-3 text-text-muted tabular-nums">
+            {pipe &&
+              t("home.queueDetail", {
+                ex: pipe.pending_extraction ?? 0,
+                llm: pipe.pending_llm ?? 0,
+                mitre: pipe.pending_mitre ?? 0,
+              })}
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  );
+}
+
+function StatusWord({ state }: { state: "online" | "down" | "cached" | "checking" | "idle" | "busy" }) {
+  const { t } = useTranslation();
+  const style = {
+    online: "text-ok",
+    idle: "text-text",
+    busy: "text-warn",
+    cached: "text-warn",
+    down: "text-danger",
+    checking: "text-text-muted",
+  }[state];
+  // Shape differs per state (filled dot / ring / half / square), so status
+  // never rests on colour alone.
+  const mark = {
+    online: "rounded-full bg-current",
+    idle: "rounded-full border-2 border-current",
+    busy: "rounded-full border-2 border-current [background:linear-gradient(90deg,currentColor_50%,transparent_50%)]",
+    cached: "rounded-full border-2 border-current [background:linear-gradient(90deg,currentColor_50%,transparent_50%)]",
+    down: "bg-current",
+    checking: "rounded-full border-2 border-dashed border-current",
+  }[state];
+  return (
+    <span className={`inline-flex items-center gap-2 font-semibold ${style}`}>
+      <span aria-hidden className={`inline-block h-2.5 w-2.5 ${mark}`} />
+      {t(`home.state.${state}`)}
+    </span>
+  );
+}
+
+function LatestPosts({ onOpen }: { onOpen: (id: number) => void }) {
+  const { t } = useTranslation();
+  const posts = useQuery({ queryKey: ["posts", { limit: 8 }], queryFn: () => api.posts({ limit: 8 }) });
+  if (posts.isError)
+    return <QueryError what="latest posts" error={posts.error} onRetry={() => posts.refetch()} />;
+  if (posts.isLoading) return <p className="text-sm text-text-muted">{t("home.loadingFeed")}</p>;
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[640px] border-collapse text-sm">
+        <thead>
+          <tr className="text-left text-xs text-text-muted">
+            <th className="py-2 pr-4 font-semibold">{t("home.colPost")}</th>
+            <th className="py-2 pr-4 font-semibold">{t("home.colTitle")}</th>
+            <th className="py-2 pr-4 font-semibold">{t("home.colCategory")}</th>
+            <th className="py-2 pr-4 font-semibold">{t("home.colIntent")}</th>
+            <th className="py-2 text-right font-semibold">{t("home.colPosted")}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {posts.data?.items.map((p) => (
+            <tr
+              key={p.id}
+              className="cursor-pointer border-t border-border-soft align-baseline hover:bg-surface-1"
+              onClick={() => onOpen(p.id)}
             >
-              {loading ? "…" : up ? t("common.online") : t("common.down")}
-            </div>
-            {c?.latency_ms !== undefined && (
-              <div className="font-mono text-[10px] text-text-muted mt-1">
-                {c.latency_ms} ms
-              </div>
-            )}
-            {c?.error && (
-              <div className="font-mono text-[10px] text-danger mt-1 truncate">
-                {c.error}
-              </div>
-            )}
-          </div>
-        );
-      })}
+              <td className="py-2.5 pr-4 font-mono">
+                <button
+                  className="font-mono text-text hover:text-accent"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOpen(p.id);
+                  }}
+                >
+                  #{p.id}
+                </button>
+              </td>
+              <td className="py-2.5 pr-4 font-semibold">{p.thread_title}</td>
+              <td className="py-2.5 pr-4 text-text-muted">{p.category}</td>
+              <td className="py-2.5 pr-4 font-semibold" style={{ color: intentColor(p.intent) }}>
+                {p.intent ?? "—"}
+              </td>
+              <td className="py-2.5 text-right text-text-muted tabular-nums">
+                <time dateTime={new Date(p.source_created_at * 1000).toISOString()}>
+                  {new Date(p.source_created_at * 1000).toISOString().slice(0, 10)}
+                </time>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <Link to="/posts" className="mt-3 inline-block text-sm font-semibold text-accent underline">
+        {t("home.openFeed")}
+      </Link>
     </div>
   );
 }
 
-function FeedTeaser() {
+function TopTechniques({ data }: { data: Stats["top_techniques"] }) {
   const { t } = useTranslation();
-  const posts = useQuery({
-    queryKey: ["posts", { limit: 6 }],
-    queryFn: () => api.posts({ limit: 6 }),
-  });
-  if (posts.isLoading)
-    return (
-      <div className="font-mono text-xs text-text-muted">
-        {t("home.loadingFeed")}
-      </div>
-    );
-  return (
-    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-      {posts.data?.items.map((p) => {
-        const intentTint =
-          p.intent === "sale"
-            ? "border-l-warn"
-            : p.intent === "doxxing"
-            ? "border-l-danger"
-            : p.intent === "recruitment"
-            ? "border-l-[rgb(125,211,252)]"
-            : "border-l-accent";
-        return (
-          <article
-            key={p.id}
-            className={`border border-border-soft border-l-2 ${intentTint} bg-surface-1/60 backdrop-blur-sm p-4 hover:border-accent/60 hover:bg-surface-1/80 transition-colors`}
-          >
-            <div className="flex items-center gap-2 font-mono text-[10px] tracking-[0.15em] text-text-muted">
-              <span className="text-accent">#{p.id}</span>
-              <span>{p.category.toUpperCase()}</span>
-              {p.intent && (
-                <span className="ml-auto text-warn">
-                  {p.intent.toUpperCase()}
-                </span>
-              )}
-            </div>
-            <h3 className="font-display text-base mt-2 leading-tight text-text">
-              {p.thread_title}
-            </h3>
-            <p className="mt-2 text-xs text-text-muted line-clamp-3">
-              {p.summary || p.body_preview}
-            </p>
-          </article>
-        );
-      })}
-    </div>
-  );
-}
-
-function TopTechniques({
-  data,
-}: {
-  data: { technique_id: string; name: string | null; n: number }[];
-}) {
-  const { t } = useTranslation();
-  if (!data.length)
-    return (
-      <div className="font-mono text-xs text-text-muted">
-        {t("common.noData")}
-      </div>
-    );
+  if (!data.length) return <p className="text-sm text-text-muted">{t("common.noData")}</p>;
   const max = Math.max(...data.map((d) => d.n));
   return (
-    <div className="space-y-2">
-      {data.slice(0, 10).map((t) => (
-        <div
-          key={t.technique_id}
-          className="grid grid-cols-12 items-center gap-3 font-mono text-xs"
-        >
-          <span className="col-span-2 text-accent">{t.technique_id}</span>
-          <span className="col-span-6 text-text truncate">{t.name ?? "—"}</span>
-          <div className="col-span-3 h-1.5 bg-surface-2/60 relative overflow-hidden">
-            <div
-              className="absolute left-0 top-0 bottom-0"
-              style={{
-                width: `${(t.n / max) * 100}%`,
-                background:
-                  "linear-gradient(to right, rgba(167,139,250,0.5), rgb(167,139,250))",
-                boxShadow: "0 0 8px rgba(167,139,250,0.6)",
-              }}
-            />
-          </div>
-          <span className="col-span-1 text-right text-text-muted tabular-nums">
-            {t.n}
-          </span>
+    <>
+      <div className="mb-6 bg-surface-1 p-4">
+        <ProvenanceLegend />
+      </div>
+      <ol className="m-0 list-none p-0">
+        {data.slice(0, 10).map((d) => (
+          <li
+            key={d.technique_id}
+            className="grid grid-cols-[5.5rem_1fr_3rem] items-center gap-x-4 gap-y-1.5 border-t border-border-soft py-2.5 text-sm sm:grid-cols-[5.5rem_16rem_1fr_3rem]"
+          >
+            <span className="font-mono">{d.technique_id}</span>
+            {d.name ? (
+              <span className="truncate font-semibold">{d.name}</span>
+            ) : (
+              <span className="truncate text-warn">{t("home.notInCorpus")}</span>
+            )}
+            <span className="col-span-3 sm:col-span-1">
+              <ProvenanceBar verified={d.verified} semantic={d.semantic} unverified={d.unverified} max={max} />
+            </span>
+            <span className="row-start-1 col-start-3 text-right tabular-nums sm:row-auto sm:col-auto">{d.n}</span>
+          </li>
+        ))}
+      </ol>
+    </>
+  );
+}
+
+/* The featured finding as a picture: its evidence posts, the indicators they
+ * share, and every technique they map to. Shared nodes = correlated evidence. */
+function EvidenceWeb({ techniqueId, onOpen }: { techniqueId: string; onOpen: (id: number) => void }) {
+  const { t } = useTranslation();
+  const detail = useQuery({ queryKey: ["technique", techniqueId], queryFn: () => api.technique(techniqueId) });
+  const ids = [...new Set((detail.data?.posts ?? []).map((p) => p.raw_post_id))].slice(0, 18);
+  const postsQ = useQueries({ queries: ids.map((id) => ({ queryKey: ["post", id], queryFn: () => api.post(id) })) });
+  const posts = postsQ.map((q) => q.data).filter((p): p is PostDetail => !!p);
+  const ready = ids.length > 0 && postsQ.every((q) => !q.isLoading);
+  return (
+    <>
+      <SectionDivider label={t("home.webTitle")} trailing={t("home.webMeta", { n: ids.length })} />
+      <p className="m-0 mb-4 max-w-[70ch] text-sm text-text-muted">{t("home.webIntro")}</p>
+      {detail.isError ? (
+        <QueryError what="the evidence web" error={detail.error} onRetry={() => detail.refetch()} />
+      ) : !ready ? (
+        <div className="grid h-[420px] place-items-center border border-dashed border-border-soft text-sm text-text-muted">
+          {t("home.webLoading")}
         </div>
-      ))}
-    </div>
+      ) : (
+        <Suspense fallback={<div className="route-loading" />}>
+          <EvidenceGraph posts={posts} onSelectPost={onOpen} height={520} focusTechnique={techniqueId} />
+        </Suspense>
+      )}
+    </>
   );
 }

@@ -16,6 +16,9 @@ beautifulsoup4==4.12.3
 
 # Stage 3 — extraction (also: python -m spacy download en_core_web_sm)
 spacy==3.7.5
+#   tldextract: Public Suffix List check so `node.js` / `file.exe` aren't
+#   reported as domains. Uses its bundled PSL snapshot (offline).
+tldextract==5.4.0
 
 # Stage 7 — multilingual ingestion.
 #   langdetect: pure-Python language detection, no model download.

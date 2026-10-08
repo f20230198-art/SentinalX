@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api, type TechniqueListItem } from "../lib/api";
 import { SectionDivider } from "../components/Shell";
 import { DetailPanel } from "../components/DetailPanel";
+import { ProvenanceLabel, ProvenanceLegend, QueryError } from "../components/Evidence";
 
 /* ----------------------------------------------------------------------- *
  * MITRE ATT&CK Enterprise heatmap.
@@ -26,7 +27,10 @@ const TACTIC_ROWS: { phase: string; tactics: Tactic[] }[] = [
       { slug: "execution", label: "Execution" },
       { slug: "persistence", label: "Persistence" },
       { slug: "privilege-escalation", label: "Priv Esc" },
-      { slug: "defense-evasion", label: "Defense Evasion" },
+      // ATT&CK v18 split the old "Defense Evasion" tactic into Stealth and
+      // Defense Impairment; the corpus we ingest uses the new slugs.
+      { slug: "stealth", label: "Stealth" },
+      { slug: "defense-impairment", label: "Defense Impairment" },
     ],
   },
   {
@@ -46,11 +50,18 @@ const TACTICS: Tactic[] = TACTIC_ROWS.flatMap((r) => r.tactics);
 
 const UNCATEGORISED = "__none__";
 
+// Cells past the midpoint of the ramp carry white text.
+function onInk(count: number, max: number): boolean {
+  return count > 0 && Math.log(1 + count) / Math.log(1 + max) > 0.5;
+}
+
+// Ink ramp on a log scale: a few heavily-mapped techniques shouldn't wash
+// out the long tail.
 function shade(count: number, max: number): string {
-  if (count <= 0) return "rgba(167, 139, 250, 0.04)";
+  if (count <= 0) return "rgba(230,237,231,0.04)";
   const t = Math.min(1, Math.log(1 + count) / Math.log(1 + max));
-  const alpha = 0.12 + t * 0.78;
-  return `rgba(167, 139, 250, ${alpha.toFixed(3)})`;
+  const alpha = 0.06 + t * 0.88;
+  return `rgba(230, 237, 231, ${alpha.toFixed(3)})`;
 }
 
 export function Heatmap() {
@@ -98,49 +109,53 @@ export function Heatmap() {
     : TACTIC_ROWS;
 
   return (
-    <div className="max-w-[1840px] mx-auto px-8">
+    <div className="mx-auto max-w-[1840px] px-4 pb-24 sm:px-8">
       <SectionDivider
         index="03"
-        label="MITRE ATT&CK heatmap"
+        label="ATT&CK coverage"
         trailing={
           list.isLoading
-            ? "loading…"
-            : `${total} techniques observed · max ${max} posts`
+            ? "Loading…"
+            : `${total} techniques observed · busiest: ${max} posts`
         }
       />
+      <p className="m-0 mb-6 max-w-[70ch] text-sm text-text-muted">
+        Every technique mapped to at least one post, under each ATT&amp;CK tactic it belongs to.
+        Darker cells have more posts; a technique can sit under several tactics. Select a cell to see
+        its evidence and how each mapping was made.
+      </p>
+      {list.isError && (
+        <QueryError what="techniques" error={list.error} onRetry={() => list.refetch()} />
+      )}
 
       <div className="space-y-6">
         {rows.map((row) => (
           <div key={row.phase}>
-            <div className="mb-2 flex items-baseline gap-3 font-mono text-[10px] tracking-[0.22em] text-text-muted">
-              <span className="text-accent">{`>`}</span>
-              <span>{row.phase.toUpperCase()}</span>
-              <span className="flex-1 border-t border-border-soft/60" />
-            </div>
+            <h3 className="m-0 mb-2 text-sm font-bold">{row.phase}</h3>
 
-            <div className="border border-border-soft bg-surface-1/30 backdrop-blur-sm">
+            <div className="overflow-x-auto border border-text">
               <div
-                className="grid gap-px bg-border-soft/60 p-px"
+                className="grid gap-px bg-border-soft"
                 style={{
-                  gridTemplateColumns: `repeat(${row.tactics.length}, minmax(160px, 1fr))`,
+                  gridTemplateColumns: `repeat(${row.tactics.length}, minmax(150px, 1fr))`,
                 }}
               >
                 {row.tactics.map((t) => (
                   <div
                     key={t.slug}
-                    className="bg-base/80 px-2 py-3 font-mono text-[10px] tracking-[0.18em] text-accent text-center"
+                    className="bg-surface-1 px-2.5 py-2.5 text-left text-xs font-bold leading-tight"
                   >
-                    {t.label.toUpperCase()}
-                    <div className="text-text-muted opacity-60 mt-0.5">
+                    {t.label}
+                    <span className="ml-1 font-normal text-text-muted tabular-nums">
                       {columns[t.slug]?.length ?? 0}
-                    </div>
+                    </span>
                   </div>
                 ))}
 
                 {row.tactics.map((t) => (
                   <div
                     key={`col-${t.slug}`}
-                    className="bg-base/40 flex flex-col gap-px"
+                    className="flex flex-col gap-px bg-surface-1"
                   >
                     {columns[t.slug]?.map((it) => (
                       <button
@@ -149,31 +164,21 @@ export function Heatmap() {
                           setSelectedTech(it.technique_id);
                           setSelectedPost(null);
                         }}
-                        className={`text-left px-2 py-1.5 font-mono text-[10px] leading-tight border-l-2 transition-colors hover:border-accent ${
-                          selectedTech === it.technique_id
-                            ? "border-accent"
-                            : "border-transparent"
-                        }`}
+                        className={`px-2.5 py-1.5 text-left text-xs leading-tight outline-offset-[-2px] hover:outline hover:outline-2 hover:outline-accent ${
+                          selectedTech === it.technique_id ? "outline outline-2 outline-accent" : ""
+                        } ${onInk(it.post_count, max) ? "text-surface-1" : "text-text"}`}
                         style={{ backgroundColor: shade(it.post_count, max) }}
                         title={`${it.technique_id} — ${it.name ?? ""} (${it.post_count} posts)`}
                       >
                         <div className="flex items-baseline gap-1">
-                          <span className="text-accent font-semibold">
-                            {it.technique_id}
-                          </span>
-                          <span className="ml-auto text-text tabular-nums opacity-80">
-                            {it.post_count}
-                          </span>
+                          <span className="font-mono font-semibold">{it.technique_id}</span>
+                          <span className="ml-auto tabular-nums">{it.post_count}</span>
                         </div>
-                        <div className="text-text/85 truncate">
-                          {it.name ?? "—"}
-                        </div>
+                        <div className="truncate">{it.name ?? "—"}</div>
                       </button>
                     ))}
                     {columns[t.slug]?.length === 0 && (
-                      <div className="px-2 py-2 font-mono text-[10px] text-text-muted opacity-40 italic">
-                        none
-                      </div>
+                      <div className="px-2.5 py-2 text-xs text-text-muted">None observed</div>
                     )}
                   </div>
                 ))}
@@ -183,8 +188,8 @@ export function Heatmap() {
         ))}
       </div>
 
-      <div className="mt-3 flex items-center gap-4 font-mono text-[10px] tracking-[0.15em] text-text-muted">
-        <span>POST DENSITY</span>
+      <div className="mt-3 flex flex-wrap items-center gap-4 text-xs text-text-muted">
+        <span>Posts per technique</span>
         <div className="flex items-center gap-px">
           {[0, 1, 2, 4, 8, 16, 32].map((n) => (
             <span
@@ -195,7 +200,7 @@ export function Heatmap() {
             />
           ))}
         </div>
-        <span className="opacity-60">click a technique cell to inspect</span>
+        <span>fewer to more (log scale)</span>
       </div>
 
       <TechniquePanel
@@ -229,34 +234,33 @@ function TechniquePanel({
   if (techniqueId === null) return null;
   return (
     <aside
-      className="fixed top-0 right-0 bottom-0 w-[min(460px,100vw)] z-30 border-l border-border-soft bg-base/95 backdrop-blur-md overflow-y-auto"
-      style={{ boxShadow: "-12px 0 40px rgba(0,0,0,0.4)" }}
+      role="dialog"
+      aria-label={`Technique ${techniqueId}`}
+      className="fixed top-0 right-0 bottom-0 z-30 w-[min(460px,100vw)] overflow-y-auto border-l-2 border-rule bg-surface-1 shadow-[-12px_0_32px_rgba(0,0,0,0.45)]"
     >
       <div className="px-6 py-5">
         <div className="flex items-center justify-between mb-4">
-          <span className="font-mono text-[11px] tracking-[0.2em] text-accent">
-            {techniqueId}
-          </span>
+          <span className="font-mono text-sm text-text-muted">{techniqueId}</span>
           <button
             onClick={onClose}
-            className="font-mono text-xs text-text-muted hover:text-accent border border-border-soft px-2 py-1"
+            className="border border-text px-2.5 py-1 text-sm font-semibold hover:bg-text hover:text-surface-1"
           >
-            [ CLOSE ]
+            Close
           </button>
         </div>
 
         {loading && (
-          <div className="font-mono text-xs text-text-muted">loading…</div>
+          <p className="text-sm text-text-muted">Loading…</p>
         )}
 
         {detail && (
           <div className="space-y-5">
             <header>
-              <h2 className="font-display text-lg leading-tight">
+              <h2 className="m-0 text-xl font-bold leading-tight">
                 {detail.name ?? "—"}
               </h2>
               {detail.tactics && detail.tactics.length > 0 && (
-                <div className="font-mono text-[10px] tracking-[0.15em] text-text-muted mt-1">
+                <div className="mt-1 text-sm text-text-muted">
                   {detail.tactics.join(" · ")}
                 </div>
               )}
@@ -265,41 +269,40 @@ function TechniquePanel({
                   href={detail.url}
                   target="_blank"
                   rel="noreferrer"
-                  className="font-mono text-[10px] text-accent hover:underline"
+                  className="mt-1 inline-block text-sm font-semibold text-accent underline"
                 >
-                  attack.mitre.org ↗
+                  Open on attack.mitre.org
                 </a>
               )}
             </header>
 
             {detail.description && (
               <section>
-                <SectionLabel>DESCRIPTION</SectionLabel>
-                <p className="text-xs leading-relaxed text-text/85 line-clamp-[12]">
+                <SectionLabel>Description</SectionLabel>
+                <p className="m-0 text-sm leading-relaxed line-clamp-[12]">
                   {detail.description}
                 </p>
               </section>
             )}
 
             <section>
-              <SectionLabel>POSTS ({detail.posts.length})</SectionLabel>
-              <ul className="space-y-1 font-mono text-xs">
+              <SectionLabel>Evidence: {detail.posts.length} mappings</SectionLabel>
+              <div className="mb-3"><ProvenanceLegend compact /></div>
+              <ul className="m-0 list-none p-0 text-sm">
                 {detail.posts.map((p) => (
                   <li key={`${p.raw_post_id}-${p.source}`}>
                     <button
                       onClick={() => onSelectPost(p.raw_post_id)}
-                      className="w-full text-left px-2 py-1.5 border border-transparent hover:border-accent hover:bg-accent/5 transition-colors"
+                      className="w-full border-t border-border-soft px-1 py-2 text-left hover:bg-surface-2"
                     >
                       <div className="flex items-baseline gap-2">
-                        <span className="text-accent">#{p.raw_post_id}</span>
-                        <span className="text-text-muted text-[10px]">
-                          {p.category}
-                        </span>
-                        <span className="ml-auto text-text-muted text-[10px]">
-                          {p.source.replace("llm_", "")}
+                        <span className="font-mono">#{p.raw_post_id}</span>
+                        <span className="text-xs text-text-muted">{p.category}</span>
+                        <span className="ml-auto">
+                          <ProvenanceLabel source={p.source} />
                         </span>
                       </div>
-                      <div className="text-text truncate mt-0.5">
+                      <div className="mt-0.5 truncate font-semibold">
                         {p.thread_title}
                       </div>
                     </button>
@@ -316,8 +319,6 @@ function TechniquePanel({
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div className="font-mono text-[10px] tracking-[0.2em] text-text-muted mb-2">
-      {children}
-    </div>
+    <h3 className="m-0 mb-2 border-t-2 border-rule pt-2 text-sm font-bold">{children}</h3>
   );
 }

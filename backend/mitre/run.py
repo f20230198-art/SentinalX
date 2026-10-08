@@ -264,12 +264,21 @@ def process_batch(
         rows = _fetch_unmatched(conn, batch_size, include_llmless=include_llmless)
         seen = len(rows)
         if rows:
-            # Embed all post bodies in one batch -- sentence-transformers is
-            # much faster on a batch than one-at-a-time.
-            bodies = [r["body"] for r in rows]
+            # Chunk every post (MiniLM truncates at 256 word-pieces), then
+            # embed ALL chunks of the batch in one call -- sentence-transformers
+            # is much faster on a batch than one-at-a-time. `bounds` remembers
+            # which slice of the chunk matrix belongs to which post.
+            chunks: list[str] = []
+            bounds: list[tuple[int, int]] = []
+            for r in rows:
+                parts = match_mod.chunk_text(r["body"] or "")
+                bounds.append((len(chunks), len(chunks) + len(parts)))
+                chunks.extend(parts)
             t0 = time.time()
-            post_vecs = embed_mod.encode(bodies, model_name=model_name)
-            log.debug("embedded %d post bodies in %.2fs", len(bodies), time.time() - t0)
+            chunk_vecs = embed_mod.encode(chunks, model_name=model_name)
+            log.debug("embedded %d chunks for %d posts in %.2fs",
+                      len(chunks), len(rows), time.time() - t0)
+            post_vecs = [chunk_vecs[a:b] for a, b in bounds]
 
             for row, post_vec in zip(rows, post_vecs):
                 candidates = match_mod.parse_llm_candidates(row["techniques_json"])

@@ -11,6 +11,12 @@ export const API_BASE =
   "/api";
 const BASE = API_BASE;
 
+// Optional: only needed when the backend sets SENTINELX_API_KEY. Sent on
+// writes only — reads are open.
+const API_KEY = import.meta.env.VITE_API_KEY as string | undefined;
+const writeHeaders = (): Record<string, string> =>
+  API_KEY ? { "x-api-key": API_KEY } : {};
+
 async function get<T>(path: string, params?: Record<string, unknown>): Promise<T> {
   const qs = params
     ? "?" +
@@ -28,7 +34,7 @@ async function get<T>(path: string, params?: Record<string, unknown>): Promise<T
 async function post<T>(path: string, body: unknown): Promise<T> {
   const r = await fetch(`${BASE}${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...writeHeaders() },
     body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error(`${r.status} ${r.statusText} on POST ${path}`);
@@ -51,7 +57,14 @@ export interface Stats {
   by_intent: { intent: string; n: number }[];
   by_ioc_type: { ioc_type: string; n: number }[];
   by_technique_source: { source: string; n: number }[];
-  top_techniques: { technique_id: string; name: string | null; n: number }[];
+  top_techniques: {
+    technique_id: string;
+    name: string | null;
+    n: number;
+    verified: number;
+    semantic: number;
+    unverified: number;
+  }[];
   /** Language mix of the ingested corpus. */
   by_language: { lang: string; n: number }[];
   posts_translated: number;
@@ -257,6 +270,47 @@ export interface ScrapeJob {
   finished_at: number | null;
 }
 
+export interface DiscoverResult {
+  engine: string;
+  title: string;
+  url: string;
+  snippet: string;
+  onion: string | null;
+  post_id: number | null;
+  score: number;
+}
+
+export interface DiscoverResponse {
+  query: string;
+  refined: string | null;
+  refine_error: string | null;
+  results: DiscoverResult[];
+  errors: Record<string, string>;
+}
+
+export interface Watchlist {
+  id: number;
+  name: string;
+  terms: string[];
+  created_at: number;
+  hits: number;
+  unseen: number;
+}
+
+export interface Alert {
+  id: number;
+  watchlist_id: number;
+  watchlist: string;
+  raw_post_id: number;
+  matched_terms: string[];
+  seen: boolean;
+  thread_title: string;
+  category: string;
+  source: string;
+  source_created_at: number;
+  intent: string | null;
+}
+
 export const api = {
   healthz: () => get<{ status: string }>("/healthz"),
   healthzFull: () => get<HealthFull>("/healthz/full"),
@@ -279,6 +333,21 @@ export const api = {
   rerun: (id: number) => post<Investigation>(`/investigations/${id}/rerun`, {}),
   scrapeJobs: () => get<{ items: ScrapeJob[] }>("/scrape-jobs"),
   scrapeJob: (id: number) => get<ScrapeJob>(`/scrape-jobs/${id}`),
+  watchlists: () => get<{ items: Watchlist[] }>("/watchlists"),
+  createWatchlist: (body: { name: string; terms: string[] }) => post<Watchlist>("/watchlists", body),
+  deleteWatchlist: async (id: number): Promise<void> => {
+    const r = await fetch(`${BASE}/watchlists/${id}`, { method: "DELETE", headers: writeHeaders() });
+    if (!r.ok && r.status !== 204) throw new Error(`${r.status} ${r.statusText}`);
+  },
+  alerts: (watchlistId?: number) =>
+    get<{ items: Alert[]; unseen: number }>("/alerts", { watchlist_id: watchlistId }),
+  markAlertsSeen: (ids?: number[]) => post<{ updated: number }>("/alerts/seen", { ids }),
+  discoverEngines: () =>
+    get<{ items: { name: string; label: string; needs_tor: boolean }[] }>("/discover/engines"),
+  discover: (body: { query: string; engines: string[]; refine: boolean }) =>
+    post<DiscoverResponse>("/discover/search", body),
+  sendPages: (urls: string[], skip_llm = false) =>
+    post<ScrapeJob>("/scrape-jobs", { urls, skip_llm }),
   startScrapeJob: (body: {
     onion_url: string;
     source?: string;
@@ -287,7 +356,10 @@ export const api = {
   exportInvestigationUrl: (id: number) =>
     `${BASE}/investigations/${id}/export`,
   deleteInvestigation: async (id: number): Promise<void> => {
-    const r = await fetch(`${BASE}/investigations/${id}`, { method: "DELETE" });
+    const r = await fetch(`${BASE}/investigations/${id}`, {
+      method: "DELETE",
+      headers: writeHeaders(),
+    });
     if (!r.ok && r.status !== 204)
       throw new Error(`${r.status} ${r.statusText}`);
   },

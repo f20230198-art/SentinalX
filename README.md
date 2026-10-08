@@ -83,7 +83,7 @@ preserved end to end.
 |---|---|
 | **Tor hidden services** | Two real `.onion` v3 forums (DarkBay, SilkVault) over real SOCKS5 circuits. Same code paths would scrape a real darknet forum. |
 | **Multilingual ingestion** | Non-English posts (ru / es / zh / …) are detected and translated to English offline (argostranslate). IOCs are extracted from the original body; NER and LLM analysis run on the translation. |
-| **Idempotent pipeline** | Every stage has its own cursor. Re-running `--once` is always safe. |
+| **Idempotent pipeline** | Every stage has its own cursor. Re-running `--once` is always safe. A post's identity is `(forum, post id)`, and each forum has its own scrape cursor. |
 | **Explainable enrichment** | Every claim about a post traces back to a regex match, a spaCy span, a specific LLM prompt, or a cosine score. No black box. |
 | **On-demand scout** | Paste any `.onion` URL into the dashboard. A background job runs scrape → extract → LLM → MITRE end-to-end and streams progress. |
 | **Live SSE timeline** | New posts appear in the dashboard within seconds, with shimmer + comet-trail animation. |
@@ -146,6 +146,36 @@ with no further network access.
 
 ---
 
+## Testing & evaluation
+
+```bash
+backend/.venv/Scripts/python.exe -m pip install -r backend/requirements-dev.txt
+backend/.venv/Scripts/python.exe -m pytest              # 38 tests, no Ollama/Tor needed
+backend/.venv/Scripts/python.exe -m backend.eval.run    # writes backend/eval/EVAL_REPORT.md
+```
+
+- **Tests** cover IOC extraction (defanging, overlap rules, false-positive filters),
+  the store (per-forum post identity, per-source cursor, schema migration), MITRE
+  matching math, LLM output validation + prompt-injection fencing, and the API
+  (auth, rate limiting). CI runs them on every push (`.github/workflows/ci.yml`).
+- **Evaluation** measures accuracy instead of claiming it: IOC precision/recall on
+  synthetic cases with ground truth by construction, intent accuracy and MITRE
+  mapping P/R/F1 (LLM-only vs semantic-only vs hybrid) on a hand-labelled gold set,
+  and a threshold sweep for the semantic matcher. See `backend/eval/EVAL_REPORT.md`.
+
+## Security posture
+
+- **Prompt injection:** scraped posts are fenced as untrusted data in every prompt,
+  marker look-alikes inside posts are neutralised, and every JSON response is
+  schema-validated (closed intent labels, bounded sizes) before it is stored.
+- **Write protection:** set `SENTINELX_API_KEY` to require an `X-API-Key` header on
+  all POST/PATCH/DELETE requests (frontend: `VITE_API_KEY`). Expensive endpoints
+  (scrape jobs, lens reruns) are rate-limited per IP (`SENTINELX_RATE_LIMIT`, default 10/min).
+- **Live feed:** SSE frames carry ids, so a reconnecting browser resumes via
+  `Last-Event-ID` without gaps or replays.
+
+---
+
 ## Hosting
 
 | Component | Where | Free? |
@@ -154,6 +184,11 @@ with no further network access.
 | FastAPI + SQLite | **Render** (one-click via [`render.yaml`](render.yaml)) | ✓ (cold-start ~30s) |
 | Ollama + Mistral | **Local machine** (GPU) | — no free GPU hosting |
 | Tor + .onion forums | **Local machine** (Docker) | — free PaaS providers ban Tor |
+
+The plain `runtime: python` deploy can't run WeasyPrint (no Pango/HarfBuzz), so
+`/export` returns 500 there. [`Dockerfile.api`](Dockerfile.api) installs those
+libraries and only the API's dependencies (`backend/requirements-api.txt`, no
+torch). Point a Render Docker service at it to get PDF export in production.
 
 ---
 

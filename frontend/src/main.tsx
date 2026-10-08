@@ -3,6 +3,8 @@ import ReactDOM from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App";
+import "@fontsource-variable/public-sans";
+import "@fontsource-variable/jetbrains-mono";
 import "./index.css";
 // Side-effect import: initialises i18next before any component renders.
 import "./i18n";
