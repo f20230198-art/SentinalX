@@ -1,17 +1,4 @@
-"""Thin Ollama HTTP client.
-
-Ollama exposes a local REST API on http://127.0.0.1:11434. We hit two endpoints:
-
-  POST /api/generate  - completion-style: prompt in, text out.
-                        We request format=json + stream=False for the prompts
-                        whose output we parse, and plain text (format omitted)
-                        for the free-form summary.
-  GET  /api/tags      - list installed models. Used as a startup health-check.
-
-We deliberately do NOT use the `ollama` Python package. It adds a dependency
-to do the same two POSTs we'd write by hand, and locks us to a particular
-release cadence. httpx is already in the project (used by the scraper).
-"""
+"""Small HTTP client for the local Ollama LLM server (/api/generate, /api/tags)."""
 
 from __future__ import annotations
 
@@ -20,23 +7,25 @@ from dataclasses import dataclass
 
 import httpx
 
+# Where Ollama runs on this machine
 DEFAULT_BASE_URL = "http://127.0.0.1:11434"
-# Generation is the slowest step in the pipeline. Mistral on CPU regularly takes
-# 20-60s per prompt for our post sizes; we budget 5 minutes per call to be
-# safe, with a short connect timeout because the server is local.
+# LLM calls are slow on CPU, so allow up to 5 min per call
 DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=300.0, write=10.0, pool=10.0)
 
 
+# One LLM reply: the generated text + the full raw JSON from Ollama
 @dataclass(frozen=True)
 class Generation:
     text: str
     raw: dict
 
 
+# Raised when Ollama is down or replies with something broken
 class OllamaError(RuntimeError):
     pass
 
 
+# Talks to Ollama one request at a time (use with `with OllamaClient() as c:`)
 class OllamaClient:
     def __init__(
         self,
@@ -46,11 +35,13 @@ class OllamaClient:
     ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
+        # Reusable HTTP connection to Ollama
         self._client = httpx.Client(base_url=self.base_url, timeout=timeout)
 
     def close(self) -> None:
         self._client.close()
 
+    # Lets you use `with OllamaClient() as c:` so the connection closes automatically
     def __enter__(self) -> "OllamaClient":
         return self
 
@@ -75,13 +66,8 @@ class OllamaClient:
         temperature: float = 0.2,
         num_predict: int = 512,
     ) -> Generation:
-        """Single non-streaming generation call.
-
-        json_mode=True asks Ollama to constrain output to valid JSON. Mistral
-        will still occasionally emit prose around the JSON; callers that need
-        a parsed object should use chain._extract_json() rather than json.loads
-        directly on .text.
-        """
+        """One LLM call; json_mode asks for JSON (parse with chain._extract_json)."""
+        # Build the request, send it, and fail clearly if Ollama errors out
         body = _build_body(self.model, prompt, system, json_mode, temperature, num_predict)
         try:
             r = self._client.post("/api/generate", json=body)
@@ -89,6 +75,7 @@ class OllamaClient:
         except httpx.HTTPError as e:
             raise OllamaError(f"generate failed: {e}") from e
 
+        # Ollama replies with JSON; the generated text is in "response"
         try:
             payload = r.json()
         except json.JSONDecodeError as e:
@@ -106,26 +93,24 @@ def _build_body(
     temperature: float,
     num_predict: int,
 ) -> dict:
+    # stream=False = wait for the full answer instead of word by word
     body: dict = {
         "model": model,
         "prompt": prompt,
         "stream": False,
         "options": {"temperature": temperature, "num_predict": num_predict},
     }
+    # Optional system prompt (the "role" instructions)
     if system is not None:
         body["system"] = system
+    # Ask Ollama to only output valid JSON
     if json_mode:
         body["format"] = "json"
     return body
 
 
 class AsyncOllamaClient:
-    """Async sibling of OllamaClient.
-
-    Same surface, same defaults, backed by httpx.AsyncClient so multiple
-    in-flight requests can share one TCP connection pool. Used by
-    chain.analyse_post_async to fire the 4 prompts for a post in parallel.
-    """
+    """Async version of OllamaClient, used to run a post's 4 prompts in parallel."""
 
     def __init__(
         self,
@@ -135,6 +120,7 @@ class AsyncOllamaClient:
     ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
+        # Async HTTP connection (many requests can be in flight at once)
         self._client = httpx.AsyncClient(base_url=self.base_url, timeout=timeout)
 
     async def aclose(self) -> None:
@@ -163,6 +149,7 @@ class AsyncOllamaClient:
         temperature: float = 0.2,
         num_predict: int = 512,
     ) -> Generation:
+        # Same steps as the normal client, just awaited
         body = _build_body(self.model, prompt, system, json_mode, temperature, num_predict)
         try:
             r = await self._client.post("/api/generate", json=body)

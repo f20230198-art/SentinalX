@@ -1,17 +1,5 @@
-"""
-Seed the synthetic forum DB with realistic-looking darknet threads + posts.
-
-Idempotent-ish: if FORUM_DB already exists with data, this will *append* a fresh
-batch. Pass --reset to drop + recreate from schema.sql.
-
-The posts are intentionally rich in IOCs (IPs, CVEs, BTC addresses, hashes,
-domains, threat actor names) so the downstream NER + LLM pipeline has something
-to extract.
-
-Usage:
-    python seed_data.py            # init (if needed) and seed
-    python seed_data.py --reset    # drop tables + reseed from scratch
-    python seed_data.py --count 80 # change batch size (default 50)
+"""Fill the DarkBay DB with fake IOC-rich threads.
+Run: python seed_data.py [--reset] [--count N]
 """
 
 from __future__ import annotations
@@ -24,10 +12,12 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+# Where the DB and schema live
 HERE = Path(__file__).parent.resolve()
 DB_PATH = os.environ.get("FORUM_DB", str(HERE / "forum.db"))
 SCHEMA = HERE / "schema.sql"
 
+# Forum categories and fake usernames
 CATEGORIES = ["marketplace", "credentials", "access", "vulnerabilities", "general"]
 
 USERS = [
@@ -76,8 +66,7 @@ INDUSTRIES = [
 ]
 
 
-# Each template renders into a believable post body. They mix categories,
-# IOCs, and prose so NER + LLM extraction has signal to chew on.
+# Post templates (filled with random IOCs)
 TEMPLATES: list[tuple[str, str, str]] = [
     # (category, title, body_template)
     (
@@ -154,14 +143,7 @@ TEMPLATES: list[tuple[str, str, str]] = [
     ),
 ]
 
-# Non-English threads. Real darknet CTI is heavily multilingual — Russian and
-# Spanish forums carry some of the earliest signal. These templates exercise
-# the Stage-7 pipeline: language detection + offline translation before
-# extraction/LLM. IOC placeholders are kept verbatim (IPs, CVEs, BTC, hashes
-# are language-agnostic and IOC regexes run on the *original* body), so a
-# translated post still yields the same indicators as an English one.
-#
-# Tuple shape: (lang, category, title_template, body_template).
+# Non-English (lang, category, title, body) templates to test translation
 MULTILINGUAL_TEMPLATES: list[tuple[str, str, str, str]] = [
     (
         "ru",
@@ -205,6 +187,7 @@ MULTILINGUAL_TEMPLATES: list[tuple[str, str, str, str]] = [
 ]
 
 
+# Short replies added under threads
 REPLY_TEMPLATES = [
     "vouch, dealt with op last month, legit.",
     "scam. pulled this exact dump from a leak in {date}.",
@@ -219,12 +202,14 @@ REPLY_TEMPLATES = [
 ]
 
 
+# Create the tables from schema.sql
 def init_schema(conn: sqlite3.Connection) -> None:
     with open(SCHEMA, "r", encoding="utf-8") as f:
         conn.executescript(f.read())
     conn.commit()
 
 
+# Drop everything and start fresh
 def reset_db(conn: sqlite3.Connection) -> None:
     conn.executescript("DROP TABLE IF EXISTS posts; DROP TABLE IF EXISTS threads;")
     conn.commit()
@@ -242,6 +227,7 @@ def random_post_body(category: str, base_ts: float) -> tuple[str, str]:
     return title_tpl.format(**fields), body_tpl.format(**fields)
 
 
+# Random values that fill the {placeholders} in templates
 def _random_fields() -> dict[str, object]:
     """The shared placeholder pool used by every post template."""
     return {
@@ -274,17 +260,13 @@ def _random_fields() -> dict[str, object]:
 
 
 def random_multilingual_post() -> tuple[str, str, str]:
-    """Render a random non-English thread.
-
-    Returns (category, title, body) drawn from MULTILINGUAL_TEMPLATES — used to
-    salt the corpus with Russian/Spanish posts so the Stage-7 detect+translate
-    path has real data to exercise.
-    """
+    """Random non-English thread; returns (category, title, body)."""
     lang, category, title_tpl, body_tpl = random.choice(MULTILINGUAL_TEMPLATES)
     fields = _random_fields()
     return category, title_tpl.format(**fields), body_tpl.format(**fields)
 
 
+# A random reply with its own random values
 def random_reply_body() -> str:
     fields = {
         "date": (
@@ -310,8 +292,7 @@ def seed(conn: sqlite3.Connection, n_threads: int) -> None:
         # Spread thread creation over last 14 days.
         thread_ts = now - random.uniform(0, 14 * 86400)
 
-        # ~20% of threads are non-English, to exercise the Stage-7
-        # detect + translate pipeline. The rest use the English templates.
+        # ~20% of threads are non-English
         if random.random() < 0.20:
             category, title, op_body = random_multilingual_post()
             multilingual_count += 1
@@ -352,16 +333,19 @@ def seed(conn: sqlite3.Connection, n_threads: int) -> None:
 
 
 def main() -> None:
+    # Command-line options
     parser = argparse.ArgumentParser()
     parser.add_argument("--reset", action="store_true", help="drop + recreate tables")
     parser.add_argument("--count", type=int, default=50, help="how many threads to seed")
     parser.add_argument("--seed", type=int, default=None, help="RNG seed for reproducibility")
     args = parser.parse_args()
 
+    # Fixed seed = the same fake data every time
     if args.seed is not None:
         random.seed(args.seed)
 
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+    # Create tables (or reset them), then fill them
     conn = sqlite3.connect(DB_PATH)
     try:
         if args.reset:

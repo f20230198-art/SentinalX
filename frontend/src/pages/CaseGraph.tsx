@@ -7,35 +7,25 @@ import { DetailPanel } from "../components/DetailPanel";
 import { QueryError } from "../components/Evidence";
 import { EvidenceGraph } from "../components/EvidenceGraph";
 
-/* ----------------------------------------------------------------------- *
- * Case-file graph.
- *
- * Route: /investigations/:id/graph
- *
- * For a given investigation, render a single d3-force canvas containing:
- *   - one POST node per matched post (cap MAX_POSTS for legibility),
- *   - one IOC node per unique (ioc_type, value) seen across those posts,
- *   - one MITRE node per unique technique_id seen across those posts.
- * Edges: post→ioc, post→technique. Shared IOCs/techniques pull their posts
- * into clusters automatically — that's the whole point of the view.
- *
- * IocPivot.tsx is the structural reference; this is the bigger-picture
- * overlay it complements.
- * ----------------------------------------------------------------------- */
+/* Investigation graph (/investigations/:id/graph): posts linked to their IOCs and techniques */
 
+// Max posts drawn, so the graph stays readable
 const MAX_POSTS = 25;
 
+// Investigation id from the URL, and the post open in the side panel
 export function CaseGraph() {
   const { id } = useParams<{ id: string }>();
   const investigationId = id ? Number(id) : NaN;
   const [selectedPost, setSelectedPost] = useState<number | null>(null);
 
+  // Load the investigation and its matching posts
   const inv = useQuery({
     queryKey: ["investigation", investigationId],
     queryFn: () => api.investigation(investigationId),
     enabled: Number.isFinite(investigationId),
   });
 
+  // Ids of the first 25 matching posts
   const matchedIds = useMemo(
     () =>
       (inv.data?.matched_posts ?? [])
@@ -44,6 +34,7 @@ export function CaseGraph() {
     [inv.data],
   );
 
+  // Load each post's details in parallel
   const postsQ = useQueries({
     queries: matchedIds.map((pid) => ({
       queryKey: ["post", pid],
@@ -51,6 +42,7 @@ export function CaseGraph() {
     })),
   });
 
+  // Only the posts that have finished loading
   const posts = useMemo(
     () =>
       postsQ
@@ -61,6 +53,7 @@ export function CaseGraph() {
 
   const loadingPosts = postsQ.some((q) => q.isLoading);
 
+  // Bad id in the URL
   if (!Number.isFinite(investigationId)) {
     return (
       <div className="mx-auto max-w-[1440px] px-4 pt-12 sm:px-8">
@@ -69,6 +62,7 @@ export function CaseGraph() {
     );
   }
 
+  // More matches than we draw?
   const totalMatched = inv.data?.matched_total ?? 0;
   const truncated = totalMatched > MAX_POSTS;
 
@@ -98,6 +92,7 @@ export function CaseGraph() {
       </div>
       {inv.isError && <QueryError what="this investigation" error={inv.error} onRetry={() => inv.refetch()} />}
 
+      {/* Loading, empty, or the graph */}
       {inv.isLoading ? (
         <p className="text-sm text-text-muted">Loading the investigation…</p>
       ) : matchedIds.length === 0 ? (

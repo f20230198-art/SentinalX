@@ -1,18 +1,5 @@
-"""
-Seed the SilkVault forum DB with realistic-looking darknet listings + messages.
-
-SilkVault is SentinelX's second synthetic forum. Its seed content is written to
-be *recognisably its own forum* — different boards, vendors, and listing styles
-than DarkBay — while still being dense with IOCs (IPs, CVEs, BTC wallets,
-hashes, domains, actors) so the SentinelX pipeline has signal to extract.
-
-Idempotent-ish: if VAULT_DB already exists with data, this appends a fresh
-batch. Pass --reset to drop + recreate from schema.sql.
-
-Usage:
-    python seed_data.py            # init (if needed) and seed
-    python seed_data.py --reset    # drop tables + reseed from scratch
-    python seed_data.py --count 70 # change batch size (default 55)
+"""Fill the SilkVault DB with fake IOC-rich listings.
+Run: python seed_data.py [--reset] [--count N]
 """
 
 from __future__ import annotations
@@ -25,6 +12,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+# Where the DB and schema live
 HERE = Path(__file__).parent.resolve()
 DB_PATH = os.environ.get("VAULT_DB", str(HERE / "vault.db"))
 SCHEMA = HERE / "schema.sql"
@@ -83,8 +71,7 @@ SECTORS = [
     "Gulf-region oil services firm", "Mexican credit union",
 ]
 
-# Wallet pools above had readability placeholders; normalise to clean strings
-# here so the seed never emits malformed addresses.
+# Clean up the wallet strings
 FAKE_BTC = [
     "bc1q9d8h4jp7r2n6w0qz3v5x8c1m4k7t0y2u5i8o3a",
     "bc1qe7m2p9k4r6t8w1n3x5z7c0v2b4n6m8q0w2e4r5",
@@ -96,9 +83,7 @@ FAKE_MONERO = [
 ]
 
 
-# Each template renders to a believable SilkVault listing. They mix boards,
-# IOCs, and prose. SilkVault leans more "vendor catalogue / escrow" in tone
-# than DarkBay's bbs chatter — another way the two forums read differently.
+# Listing templates (filled with random IOCs)
 TEMPLATES: list[tuple[str, str, str]] = [
     # (board, title_template, body_template)
     (
@@ -183,6 +168,7 @@ TEMPLATES: list[tuple[str, str, str]] = [
     ),
 ]
 
+# Short replies added under listings
 REPLY_TEMPLATES = [
     "vouch — escrow cleared with this vendor twice, delivery as described.",
     "scam flag: same {service} dump was floating on another board in {date}.",
@@ -197,18 +183,21 @@ REPLY_TEMPLATES = [
 ]
 
 
+# Create the tables from schema.sql
 def init_schema(conn: sqlite3.Connection) -> None:
     with open(SCHEMA, "r", encoding="utf-8") as f:
         conn.executescript(f.read())
     conn.commit()
 
 
+# Drop everything and start fresh
 def reset_db(conn: sqlite3.Connection) -> None:
     conn.executescript("DROP TABLE IF EXISTS messages; DROP TABLE IF EXISTS listings;")
     conn.commit()
     init_schema(conn)
 
 
+# Random values that fill the {placeholders} in templates
 def _fields() -> dict[str, object]:
     return {
         "sector": random.choice(SECTORS),
@@ -245,6 +234,7 @@ def random_listing_body(board: str) -> tuple[str, str]:
     return title_tpl.format(**f), body_tpl.format(**f)
 
 
+# A random reply with its own random values
 def random_reply_body() -> str:
     return random.choice(REPLY_TEMPLATES).format(**_fields())
 
@@ -297,6 +287,7 @@ def seed(conn: sqlite3.Connection, n_listings: int) -> None:
 
 
 def main() -> None:
+    # Command-line options
     parser = argparse.ArgumentParser()
     parser.add_argument("--reset", action="store_true", help="drop + recreate tables")
     parser.add_argument("--count", type=int, default=55,
@@ -305,10 +296,12 @@ def main() -> None:
                         help="RNG seed for reproducibility")
     args = parser.parse_args()
 
+    # Fixed seed = the same fake data every time
     if args.seed is not None:
         random.seed(args.seed)
 
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+    # Create tables (or reset them), then fill them
     conn = sqlite3.connect(DB_PATH)
     try:
         if args.reset:

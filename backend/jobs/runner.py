@@ -1,27 +1,4 @@
-"""On-demand pipeline job runner.
-
-A pipeline job is one end-to-end run triggered from the UI: the user pastes an
-.onion URL, and SentinelX scrapes it (HTML), extracts IOCs/entities, enriches
-with the LLM, maps to MITRE ATT&CK, and surfaces mitigations — all on demand,
-for a forum it has never seen before.
-
-The runner executes every stage **in-process** by calling the existing stage
-functions directly (no subprocesses): it is the same code paths as
-`python -m backend.scraper.run` etc., just driven from one function and
-reporting progress into the `pipeline_jobs` row as it goes.
-
-Concurrency model:
-  * One job runs in its own background thread (started by the API layer).
-  * The job opens its OWN Store / sqlite connection — never shares the API's
-    connection. SQLite serialises writes, and each stage is a short burst, so
-    a single concurrent job is safe. The API only ever READS pipeline_jobs.
-
-Graceful LLM degradation:
-  * The LLM stage needs Ollama. If Ollama is unreachable, the job does NOT
-    fail — it skips LLM enrichment, records `llm_skipped`, and still runs
-    extraction + semantic MITRE matching (which uses MiniLM embeddings, not
-    the LLM). A forum still gets IOCs and technique mappings without a GPU.
-"""
+"""Runs the full pipeline for one .onion URL in a background thread (skips LLM if Ollama is down)."""
 
 from __future__ import annotations
 
@@ -52,6 +29,7 @@ def create_job(conn: sqlite3.Connection, onion_url: str, source: str) -> int:
     return int(cur.lastrowid)
 
 
+# Read one job row (None if it doesn't exist)
 def get_job(conn: sqlite3.Connection, job_id: int) -> dict | None:
     row = conn.execute(
         "SELECT * FROM pipeline_jobs WHERE id = ?", (job_id,)
@@ -59,6 +37,7 @@ def get_job(conn: sqlite3.Connection, job_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+# Most recent jobs first
 def list_jobs(conn: sqlite3.Connection, limit: int = 25) -> list[dict]:
     rows = conn.execute(
         "SELECT * FROM pipeline_jobs ORDER BY created_at DESC LIMIT ?", (limit,)
@@ -68,6 +47,7 @@ def list_jobs(conn: sqlite3.Connection, limit: int = 25) -> list[dict]:
 
 def _update(conn: sqlite3.Connection, job_id: int, **fields) -> None:
     """Patch named columns on a job row; always bumps updated_at."""
+    # Build "col1 = ?, col2 = ?" from the given fields and save them
     fields["updated_at"] = time.time()
     sets = ", ".join(f"{k} = ?" for k in fields)
     conn.execute(
@@ -91,24 +71,12 @@ def run_job(
     skip_llm: bool = False,
     urls: list[str] | None = None,
 ) -> None:
-    """Run the full pipeline for one .onion URL. Designed to run in a thread.
-
-    `urls` switches the scrape step to *pages mode*: instead of crawling one
-    SilkVault-structured forum, each URL (typically chosen from a discovery
-    search) is fetched once and read with the generic page reader.
-
-    `skip_llm` forces the LLM enrichment stage to be skipped — the "fast mode"
-    used for a live demo on battery, where Mistral is too slow to wait for.
-    Scrape + extract + semantic MITRE still run, so the forum still gets IOCs
-    and ATT&CK mappings; only the LLM summary/intent fields are left empty.
-
-    Updates the pipeline_jobs row as each stage completes. Never raises — any
-    failure is captured into the row's `error` field and `status='error'`, so
-    the caller (a daemon thread) can't crash silently.
-    """
+    """Scrape -> extract -> LLM -> MITRE for one job; writes progress/errors to the job row, never raises."""
+    # The job opens its own DB connection (never shares the API's)
     store = Store(db_path) if db_path else Store()
     conn = store.conn
     try:
+        # Run every stage; any crash is saved on the job row as an error
         _run_stages(conn, store, job_id, onion_url, source, proxy, ollama_url,
                     skip_llm, urls)
     except Exception as e:  # noqa: BLE001 — top-level guard for the worker thread
@@ -131,8 +99,10 @@ def _run_stages(
     urls: list[str] | None = None,
 ) -> None:
     # --- Step 1: scrape (HTML) ---------------------------------------- #
+    # Pages mode: read specific pages picked on the Discover page
     if urls:
         inserted, duplicates, page_sources = _read_pages(conn, store, job_id, urls, proxy)
+    # Forum mode: crawl the whole forum
     else:
         _update(conn, job_id, status="running", stage="scraping",
                 message=f"crawling {onion_url}")
@@ -141,8 +111,7 @@ def _run_stages(
         from backend.scraper.html_client import HtmlForumClient
 
         with HtmlForumClient(onion_url, proxy=proxy) as client:
-            # Per-source cursor: re-scraping this forum isn't held back by other
-            # forums' newer posts. Only genuinely-new posts on THIS forum count.
+            # Only count posts newer than this forum's last scrape
             crawl = client.crawl(since=store.get_cursor(source=source), source=source)
         if crawl.errors:
             log.warning("job %d: crawl had %d error(s)", job_id, len(crawl.errors))
@@ -153,10 +122,8 @@ def _run_stages(
                     f"({duplicates} already seen)")
     log.info("job %d: scraped inserted=%d duplicates=%d", job_id, inserted, duplicates)
 
-    # Even if nothing new was scraped, a previous job for this forum may have
-    # left posts un-enriched (interrupted run, Ollama was down, etc.). Drain
-    # any pending pipeline work rather than bailing — the stages are idempotent
-    # and no-op when there's genuinely nothing to do.
+    # Even with nothing new, finish leftover posts from earlier runs
+    # Count posts from this forum that still need extraction or MITRE matching
     src_in = ",".join("?" for _ in page_sources)
     pending = conn.execute(
         f"SELECT COUNT(*) FROM raw_posts WHERE source IN ({src_in}) AND ("
@@ -165,6 +132,7 @@ def _run_stages(
         "     WHERE pps.raw_post_id = raw_posts.id AND pps.stage = 'mitre'))",
         page_sources,
     ).fetchone()[0]
+    # Nothing new and nothing pending -> job is done
     if inserted == 0 and pending == 0:
         _update(conn, job_id, status="done", stage="done",
                 message="no new posts — this forum is already fully enriched",
@@ -181,9 +149,11 @@ def _run_stages(
     from backend.pipeline.extract import EntityExtractor, IOCExtractor
     from backend.pipeline.run import run_once as extract_run_once
 
+    # Reuse the normal extraction stage code
     ent = EntityExtractor()
     ioc = IOCExtractor()
     extract_run_once(store, ioc, ent, batch=200)
+    # How many of this forum's posts are now extracted
     extracted = conn.execute(
         f"SELECT COUNT(*) FROM raw_posts WHERE source IN ({src_in}) AND processed_at IS NOT NULL",
         page_sources,
@@ -192,6 +162,7 @@ def _run_stages(
             message=f"extracted IOCs from {extracted} posts")
 
     # --- Step 3: LLM enrichment (skippable; graceful if Ollama down) -- #
+    # Fast mode skips the LLM; otherwise try it (skipped automatically if Ollama is down)
     if skip_llm:
         log.info("job %d: LLM stage skipped (fast mode)", job_id)
         _update(conn, job_id, stage="llm", llm_skipped=1,
@@ -207,14 +178,13 @@ def _run_stages(
     from backend.mitre import embed as embed_mod
     from backend.mitre.run import run_once as mitre_run_once
 
-    # In fast mode the LLM stage was skipped, so posts have no 'llm' state row.
-    # include_llmless lets MITRE still match them — pure semantic, no LLM
-    # verification — so a fast-mode forum still gets ATT&CK technique mappings.
+    # Fast mode (no LLM): still map techniques with semantic matching
     mitre_run_once(
         store, model_name=embed_mod.DEFAULT_MODEL,
         batch=25, topk=5, threshold=0.45, limit=None,
         include_llmless=skip_llm,
     )
+    # How many technique matches this forum's posts now have
     mapped = conn.execute(
         "SELECT COUNT(*) FROM post_techniques pt "
         f"JOIN raw_posts rp ON rp.id = pt.raw_post_id WHERE rp.source IN ({src_in})",
@@ -223,6 +193,7 @@ def _run_stages(
     _update(conn, job_id, techniques_mapped=mapped)
 
     # --- done -------------------------------------------------------- #
+    # Build the final summary message for the UI
     total_posts = conn.execute(
         f"SELECT COUNT(*) FROM raw_posts WHERE source IN ({src_in})", page_sources
     ).fetchone()[0]
@@ -244,16 +215,12 @@ def _run_stages(
 def _read_pages(
     conn: sqlite3.Connection, store: Store, job_id: int, urls: list[str], proxy: str,
 ) -> tuple[int, int, list[str]]:
-    """Pages mode: fetch each URL over Tor and read it generically.
-
-    Each page is its own source (its .onion host), so per-forum provenance and
-    the composite (source, post id) identity still hold. One unreachable page
-    never fails the job; failures are counted and reported in the message.
-    """
+    """Pages mode: fetch each URL over Tor and read it as a post (failures counted, not fatal)."""
     import httpx
 
     from backend.discovery.page_reader import read_page
 
+    # Fetch each page over Tor and turn it into a post
     _update(conn, job_id, status="running", stage="scraping",
             message=f"reading {len(urls)} discovered pages over Tor")
     posts, failed = [], 0
@@ -273,6 +240,7 @@ def _read_pages(
                 log.warning("job %d: page %s failed: %s", job_id, url, e)
                 failed += 1
             _update(conn, job_id, message=f"read {i}/{len(urls)} pages ({failed} unreadable)")
+    # Save each post under its own .onion host as the source
     inserted = duplicates = 0
     for p in posts:  # one source per page host
         ins, dup = store.insert_posts([p], source=p["source"])
@@ -286,13 +254,10 @@ def _read_pages(
 def _try_llm(
     conn: sqlite3.Connection, store: Store, job_id: int, ollama_url: str
 ) -> bool:
-    """Run the LLM stage if Ollama is reachable. Returns True on success.
-
-    If Ollama is down, marks the job's llm_skipped flag and returns False —
-    the job continues without LLM enrichment rather than failing.
-    """
+    """Run the LLM stage if Ollama is up; otherwise mark llm_skipped and return False."""
     from backend.llm.client import AsyncOllamaClient, OllamaError
 
+    # Check Ollama first; if it's down, skip the LLM step
     _update(conn, job_id, stage="checking-ollama",
             message="checking Ollama availability")
 
@@ -304,12 +269,14 @@ def _try_llm(
             "  WHERE pps.raw_post_id = rp.id AND pps.stage = 'llm')"
         ).fetchone()[0]
 
+    # How many posts have finished the LLM stage overall
     def _analysed() -> int:
         return conn.execute(
             "SELECT COUNT(*) FROM post_processing_state WHERE stage = 'llm'"
         ).fetchone()[0]
 
     async def _check_and_run() -> bool:
+        # Make sure Ollama answers before starting
         client = AsyncOllamaClient(base_url=ollama_url)
         try:
             await client.health()
@@ -322,10 +289,9 @@ def _try_llm(
 
             target = _pending()
             log.info("job %d: LLM enrichment of %d posts", job_id, target)
-            # Run in small batches and update the job row between each, so the
-            # frontend sees live progress and a death mid-stage doesn't lose
-            # all completed work (each batch commits via post_processing_state).
+            # Small batches so the UI sees live progress and work isn't lost on a crash
             done_start = _analysed()
+            # Keep analysing small batches until none are left, updating progress each time
             while True:
                 seen, _, _ = await process_batch_async(
                     store, client, batch_size=10, concurrency=4,
@@ -339,6 +305,7 @@ def _try_llm(
         finally:
             await client.aclose()
 
+    # Run the async code; any error just skips the LLM step
     try:
         ok = asyncio.run(_check_and_run())
     except Exception as e:  # noqa: BLE001 — LLM failure must not kill the job

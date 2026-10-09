@@ -14,29 +14,28 @@ import { CitationText } from "../components/CitationText";
 import { QueryError } from "../components/Evidence";
 import { intentColor } from "../lib/palette";
 
-/* ----------------------------------------------------------------------- *
- * Investigations: saved filters over the corpus, each with an optional lens
- * summary whose [#id] citations open the cited post.
- *
- * Left: the case list. Right: the selected case file — filter, lens summary
- * (the payoff), priority mitigations, matched posts.
- * ----------------------------------------------------------------------- */
+/* Investigations page: case list (left), selected case details + lens summary (right) */
 
+// The graph code loads only when it's needed
 const EvidenceGraph = lazy(() =>
   import("../components/EvidenceGraph").then((m) => ({ default: m.EvidenceGraph })),
 );
 
+// Shared button styles (outline and filled)
 const btn =
   "border border-text px-3 py-1.5 text-sm font-semibold no-underline hover:bg-text hover:text-surface-1 disabled:cursor-not-allowed disabled:opacity-40";
 const btnPrimary =
   "border border-accent bg-accent px-3 py-1.5 text-sm font-semibold text-surface-1 no-underline hover:bg-accent-strong disabled:cursor-not-allowed disabled:opacity-40";
 
+// Investigations page
 export function Investigations() {
   const qc = useQueryClient();
+  // Selected case, post open in the side panel, and whether the "new" form is showing
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [postId, setPostId] = useState<number | null>(null);
   const [creating, setCreating] = useState(false);
 
+  // Load the case list, the lens list, and the selected case's details
   const list = useQuery({ queryKey: ["investigations"], queryFn: api.investigations });
   const lenses = useQuery({ queryKey: ["lenses"], queryFn: api.lenses });
   const detail = useQuery({
@@ -45,6 +44,7 @@ export function Investigations() {
     enabled: selectedId !== null,
   });
 
+  // Re-run the LLM summary; on success, show the new result right away
   const rerun = useMutation({
     mutationFn: (id: number) => api.rerun(id),
     onSuccess: (data) => {
@@ -53,6 +53,7 @@ export function Investigations() {
     },
   });
 
+  // Delete a case and refresh the list
   const remove = useMutation({
     mutationFn: (id: number) => api.deleteInvestigation(id),
     onSuccess: (_v, id) => {
@@ -75,6 +76,7 @@ export function Investigations() {
       />
 
       <div className="grid grid-cols-12 gap-y-8 lg:gap-x-10">
+        {/* Left: case list + "new investigation" form */}
         <aside className="col-span-12 min-w-0 lg:col-span-4">
           <div className="mb-3 flex items-center justify-between">
             <h3 className="m-0 text-sm font-bold">Case files</h3>
@@ -98,6 +100,7 @@ export function Investigations() {
             <QueryError what="investigations" error={list.error} onRetry={() => list.refetch()} />
           )}
 
+          {/* One button per saved case */}
           <ul className="m-0 list-none p-0">
             {items.map((inv) => {
               const active = selectedId === inv.id;
@@ -134,6 +137,7 @@ export function Investigations() {
           </ul>
         </aside>
 
+        {/* Right: details of the selected case */}
         <section className="col-span-12 min-w-0 lg:col-span-8">
           {selectedId === null ? (
             <div className="border border-dashed border-border-soft p-8 text-sm text-text-muted">
@@ -165,11 +169,13 @@ export function Investigations() {
   );
 }
 
+// Lens id -> readable name
 function lensLabel(name: string | null, lenses: Lens[] | undefined): string {
   if (!name) return "No lens";
   return lenses?.find((l) => l.name === name)?.label ?? name;
 }
 
+// Full case view: filter, lens summary, graph, mitigations, matched posts
 function InvestigationDetail({
   loading,
   data,
@@ -190,6 +196,7 @@ function InvestigationDetail({
   onDelete: () => void;
 }) {
   // Hooks before any early return (rules of hooks).
+  // Only the filters that actually have a value
   const filterEntries = useMemo(
     () => Object.entries(data?.filters ?? {}).filter(([, v]) => v !== null && v !== undefined && v !== ""),
     [data?.filters],
@@ -207,6 +214,7 @@ function InvestigationDetail({
 
       {data.description && <p className="m-0 mb-4 max-w-[70ch] text-sm text-text-muted">{data.description}</p>}
 
+      {/* Actions: generate/rerun summary, graph, PDF, delete */}
       <div className="flex flex-wrap gap-2 pb-6">
         <button onClick={onRerun} disabled={rerunLoading || !data.lens} className={btnPrimary}
           title={data.lens ? "Ask the local LLM to rewrite the summary over the current matches" : "Set a lens first"}>
@@ -222,6 +230,7 @@ function InvestigationDetail({
       </div>
 
       <div className="space-y-8">
+        {/* Which filter this case uses and how many posts match it */}
         <section>
           <SectionLabel>Filter</SectionLabel>
           <p className="m-0 text-sm">
@@ -239,6 +248,7 @@ function InvestigationDetail({
           </p>
         </section>
 
+        {/* LLM summary; each [#id] opens the cited post */}
         <section>
           <SectionLabel>Lens summary</SectionLabel>
           {rerunError && (
@@ -264,6 +274,7 @@ function InvestigationDetail({
           )}
         </section>
 
+        {/* Small graph of the first 15 matched posts */}
         {data.matched_posts && data.matched_posts.length > 0 && (
           <section>
             <SectionLabel>Evidence graph</SectionLabel>
@@ -274,6 +285,7 @@ function InvestigationDetail({
           </section>
         )}
 
+        {/* Defences that cover the most matched posts */}
         {data.mitigations && data.mitigations.length > 0 && (
           <section>
             <SectionLabel>Priority mitigations</SectionLabel>
@@ -289,6 +301,7 @@ function InvestigationDetail({
           </section>
         )}
 
+        {/* List of matched posts */}
         {data.matched_posts && data.matched_posts.length > 0 && (
           <section>
             <SectionLabel>Matched posts ({data.matched_posts.length})</SectionLabel>
@@ -316,6 +329,7 @@ function InvestigationDetail({
   );
 }
 
+// Load the given posts and draw them as a graph
 function InlineGraph({ ids, onSelectPost }: { ids: number[]; onSelectPost: (id: number) => void }) {
   const qs = useQueries({ queries: ids.map((id) => ({ queryKey: ["post", id], queryFn: () => api.post(id) })) });
   const posts = qs.map((q) => q.data).filter((p): p is PostDetail => !!p);
@@ -328,6 +342,7 @@ function InlineGraph({ ids, onSelectPost }: { ids: number[]; onSelectPost: (id: 
   );
 }
 
+// Form for a new case: name, lens, optional intent and keyword
 function CreateForm({ lenses, onCreated }: { lenses: Lens[]; onCreated: (inv: Investigation) => void }) {
   const [name, setName] = useState("");
   const [lens, setLens] = useState<string>(lenses[0]?.name ?? "");
@@ -335,6 +350,7 @@ function CreateForm({ lenses, onCreated }: { lenses: Lens[]; onCreated: (inv: In
   const [q, setQ] = useState("");
   const [error, setError] = useState<string | null>(null);
 
+  // Build the filter from the filled-in fields and create the case
   const create = useMutation({
     mutationFn: () => {
       const filters: Record<string, unknown> = {};
@@ -352,6 +368,7 @@ function CreateForm({ lenses, onCreated }: { lenses: Lens[]; onCreated: (inv: In
   return (
     <form
       className="mb-4 space-y-3 border border-text bg-surface-1 p-4"
+      // Check a name was given, then create
       onSubmit={(e) => {
         e.preventDefault();
         setError(null);
@@ -405,6 +422,7 @@ function CreateForm({ lenses, onCreated }: { lenses: Lens[]; onCreated: (inv: In
   );
 }
 
+// One mitigation with a bar showing what share of posts it covers
 function MitigationRow({ m }: { m: InvestigationMitigation }) {
   const pct = Math.round(m.post_share * 100);
   return (

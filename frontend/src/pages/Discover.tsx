@@ -6,30 +6,28 @@ import { SectionDivider } from "../components/Shell";
 import { DetailPanel } from "../components/DetailPanel";
 import { QueryError } from "../components/Evidence";
 
-/* ----------------------------------------------------------------------- *
- * Discover — search before you scrape.
- *
- * The front half of the pipeline: a query goes to the SentinelX index (what
- * we've already collected) and, optionally, real dark-web search engines over
- * Tor. Results split into "already in your corpus" (open them) and "new on
- * the dark web" (select them and send them through the full pipeline).
- * ----------------------------------------------------------------------- */
+/* Discover page: search our DB + dark-web engines, then send new results to the pipeline */
 
+// Example searches shown under the search box
 const EXAMPLES = ["okta vpn access", "ransomware loader", "CVE-2024-3400", "healthcare database dump"];
 
+// Discover page
 export function Discover() {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
+  // Search text (kept in the URL), engine/LLM options, ticked results, open post
   const [query, setQuery] = useState(params.get("q") ?? "");
   const [useReal, setUseReal] = useState(false);
   const [refine, setRefine] = useState(false);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [openPost, setOpenPost] = useState<number | null>(null);
 
+  // Check Tor and Ollama so their options can be turned off when offline
   const health = useQuery({ queryKey: ["healthz", "full"], queryFn: api.healthzFull });
   const torUp = health.data?.checks.tor_socks?.status === "up";
   const llmUp = health.data?.checks.ollama?.status === "up";
 
+  // Run a search (local DB, plus Ahmia if ticked); clear old selections afterwards
   const search = useMutation({
     mutationFn: (q: string) =>
       api.discover({ query: q, engines: useReal ? ["local", "ahmia"] : ["local"], refine: refine && llmUp }),
@@ -40,6 +38,7 @@ export function Discover() {
   });
 
   const qc = useQueryClient();
+  // Save the query as a watchlist so future posts raise alerts
   const watch = useMutation({
     mutationFn: (q: string) => api.createWatchlist({ name: q, terms: [q] }),
     onSuccess: () => {
@@ -48,11 +47,13 @@ export function Discover() {
     },
   });
 
+  // Send the ticked pages to the pipeline, then jump to Scout to watch progress
   const send = useMutation({
     mutationFn: (urls: string[]) => api.sendPages(urls, !llmUp),
     onSuccess: (job) => navigate(`/scout?job=${job.id}`),
   });
 
+  // Start a search (needs at least 2 characters)
   const run = (q: string) => {
     const v = q.trim();
     if (v.length < 2) return;
@@ -61,11 +62,13 @@ export function Discover() {
     search.mutate(v);
   };
 
+  // Split results: already collected vs new on the dark web
   const { known, fresh } = useMemo(() => {
     const rs = search.data?.results ?? [];
     return { known: rs.filter((r) => r.engine === "local"), fresh: rs.filter((r) => r.engine !== "local") };
   }, [search.data]);
 
+  // Tick / untick a result
   const toggle = (url: string) =>
     setPicked((prev) => {
       const next = new Set(prev);
@@ -77,6 +80,7 @@ export function Discover() {
     <div className="mx-auto max-w-[1100px] px-4 pb-24 sm:px-8">
       <SectionDivider label="Discover" trailing="Search before you scrape" />
 
+      {/* Search box, example queries, and options */}
       <form
         className="border border-text bg-surface-1 p-5"
         onSubmit={(e) => {
@@ -145,12 +149,14 @@ export function Discover() {
         </fieldset>
       </form>
 
+      {/* Search failed */}
       {search.isError && (
         <div className="mt-6">
           <QueryError what="search results" error={search.error} onRetry={() => run(query)} />
         </div>
       )}
 
+      {/* Results */}
       {search.data && (
         <div className="mt-8 space-y-10" aria-live="polite">
           {(search.data.refined || search.data.refine_error) && (
@@ -162,6 +168,7 @@ export function Discover() {
               )}
             </p>
           )}
+          {/* Offer to watch this query */}
           <div className="flex flex-wrap items-center gap-3 border border-border-soft bg-surface-1 px-4 py-3 text-sm">
             <span>
               Keep an eye on <span className="font-semibold">“{search.data.query}”</span>: future posts that mention it
@@ -179,14 +186,14 @@ export function Discover() {
               </button>
             )}
           </div>
+          {/* Per-engine errors (e.g. Tor offline) */}
           {Object.entries(search.data.errors).map(([engine, msg]) => (
             <p key={engine} className="m-0 border-l-2 border-warn pl-3 text-sm text-warn">
               <span className="font-semibold">{engine}:</span> {msg}
             </p>
           ))}
 
-          {/* Both counts up front: the dark-web group sits below a possibly
-              long corpus list and is easy to miss otherwise. */}
+          {/* Result counts for both groups */}
           <p className="m-0 text-sm text-text-muted">
             <span className="font-semibold text-text tabular-nums">{known.length}</span> already collected
             {useReal && (
@@ -199,6 +206,7 @@ export function Discover() {
             )}
           </p>
 
+          {/* Posts we already have: click to open */}
           <ResultGroup
             title="Already in your corpus"
             meta={`${known.length} matches`}
@@ -211,6 +219,7 @@ export function Discover() {
             )}
           />
 
+          {/* New dark-web pages: tick to send to the pipeline */}
           {useReal && (
             <div id="dark-web-results" className="scroll-mt-24">
             <ResultGroup
@@ -230,6 +239,7 @@ export function Discover() {
         </div>
       )}
 
+      {/* Bar that appears when pages are ticked */}
       {picked.size > 0 && (
         <div className="sticky bottom-4 mt-6 flex flex-wrap items-center gap-3 border-2 border-rule bg-surface-1 p-4 shadow-[0_8px_24px_rgba(0,0,0,0.5)]">
           <span className="text-sm font-semibold">{picked.size} page{picked.size > 1 ? "s" : ""} selected</span>
@@ -252,6 +262,7 @@ export function Discover() {
   );
 }
 
+// A titled list of results; `render` decides how each row looks
 function ResultGroup({
   title,
   meta,
@@ -288,6 +299,7 @@ function ResultGroup({
 
 /** Title, location and snippet. «» marks from the index become highlights. */
 function ResultBody({ r }: { r: DiscoverResult }) {
+  // Split the snippet so «matched words» can be highlighted
   const parts = r.snippet.split(/(«[^»]*»)/g);
   return (
     <span className="block min-w-0 flex-1">

@@ -1,22 +1,17 @@
-/**
- * Tiny typed wrapper around the SentinelX API.
- *
- * In dev, vite.config.ts proxies /api/* to http://127.0.0.1:8765 so we keep
- * everything same-origin (no CORS preflights). In prod (Vercel), set
- * VITE_API_BASE to the Render URL, e.g. https://sentinelx-api.onrender.com.
- */
+/** Typed helpers for calling the SentinelX API (VITE_API_BASE sets the server URL in prod). */
 
+// Server address: VITE_API_BASE in production, "/api" in dev (Vite forwards it to the backend)
 export const API_BASE =
   (import.meta.env.VITE_API_BASE as string | undefined)?.replace(/\/$/, "") ??
   "/api";
 const BASE = API_BASE;
 
-// Optional: only needed when the backend sets SENTINELX_API_KEY. Sent on
-// writes only — reads are open.
+// Optional API key, sent only on write requests
 const API_KEY = import.meta.env.VITE_API_KEY as string | undefined;
 const writeHeaders = (): Record<string, string> =>
   API_KEY ? { "x-api-key": API_KEY } : {};
 
+// GET request: turns params into ?a=1&b=2 (skipping empty ones) and returns the JSON
 async function get<T>(path: string, params?: Record<string, unknown>): Promise<T> {
   const qs = params
     ? "?" +
@@ -31,6 +26,7 @@ async function get<T>(path: string, params?: Record<string, unknown>): Promise<T
   return r.json() as Promise<T>;
 }
 
+// POST request with a JSON body (and the API key if set)
 async function post<T>(path: string, body: unknown): Promise<T> {
   const r = await fetch(`${BASE}${path}`, {
     method: "POST",
@@ -44,6 +40,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 // --- Types mirror the FastAPI shapes. Kept loose on purpose; we tighten
 //     when we actually consume each field. -------------------------------
 
+// Dashboard numbers from /stats
 export interface Stats {
   posts_total: number;
   posts_extracted: number;
@@ -70,6 +67,7 @@ export interface Stats {
   posts_translated: number;
 }
 
+// One row in the posts list
 export interface PostListItem {
   id: number;
   thread_title: string;
@@ -79,12 +77,12 @@ export interface PostListItem {
   source_created_at: number;
   intent: string | null;
   summary: string | null;
-  /** Detected ISO language of the post ('en','ru',…) or 'unknown'.
-   *  null for posts ingested before multilingual support landed. */
+  /** Detected language ('en', 'ru', ... or 'unknown'); null for old posts. */
   lang: string | null;
   lang_confidence: number | null;
 }
 
+// One page of posts + total count for paging
 export interface PostList {
   total: number;
   limit: number;
@@ -92,6 +90,7 @@ export interface PostList {
   items: PostListItem[];
 }
 
+// Result of /healthz/full: up/down for DB, Tor, Ollama, pipeline
 export interface HealthFull {
   status: "ok" | "degraded";
   checks: Record<
@@ -105,6 +104,7 @@ export interface HealthFull {
   >;
 }
 
+// A post as sent by the live /events stream
 export interface TimelinePost {
   id: number;
   thread_title: string;
@@ -114,20 +114,21 @@ export interface TimelinePost {
   source_created_at: number;
   intent: string | null;
   summary: string | null;
-  /** Detected language of the post, or null for posts ingested before
-   *  multilingual support landed. */
+  /** Detected language; null for old posts. */
   lang: string | null;
   lang_confidence: number | null;
   techniques: { technique_id: string; source: string; name: string | null }[];
   iocs: { ioc_type: string; value: string }[];
 }
 
+// A lens the user can pick for an investigation summary
 export interface Lens {
   name: string;
   label: string;
   description: string;
 }
 
+// A saved investigation (filters + optional lens summary)
 export interface Investigation {
   id: number;
   name: string;
@@ -145,9 +146,7 @@ export interface Investigation {
   mitigations?: InvestigationMitigation[];
 }
 
-/** A MITRE mitigation as resolved for a single post — defensive recommendation
- *  driven purely by the post's technique mappings (no LLM). `addresses` lists
- *  which of the post's T-codes this mitigation counters. */
+/** MITRE mitigation for one post; `addresses` = which of its techniques it counters. */
 export interface PostMitigation {
   mitigation_id: string;
   name: string;
@@ -157,8 +156,7 @@ export interface PostMitigation {
   coverage: number;
 }
 
-/** A MITRE mitigation aggregated across an investigation's matched posts,
- *  ranked by how many of those posts it would help defend. */
+/** MITRE mitigation across an investigation, ranked by posts covered. */
 export interface InvestigationMitigation {
   mitigation_id: string;
   name: string;
@@ -169,6 +167,7 @@ export interface InvestigationMitigation {
   techniques: string[];
 }
 
+// Everything about one post (from /posts/{id})
 export interface PostDetail {
   post: {
     id: number;
@@ -177,9 +176,7 @@ export interface PostDetail {
     author: string;
     body: string;
     source_created_at: number;
-    /** Language metadata. lang is the detected ISO code; body_en is the
-     *  English translation when the post is non-English (null otherwise, and
-     *  null for posts ingested before multilingual support landed). */
+    /** Detected language + English translation (null if English or old post). */
     lang: string | null;
     lang_confidence: number | null;
     body_en: string | null;
@@ -202,6 +199,7 @@ export interface PostDetail {
   mitigations: PostMitigation[];
 }
 
+// A MITRE technique in the list, with how many posts mention it
 export interface TechniqueListItem {
   technique_id: string;
   name: string | null;
@@ -219,6 +217,7 @@ export interface TechniqueList {
   items: TechniqueListItem[];
 }
 
+// One technique plus every post mapped to it
 export interface TechniqueDetail {
   technique_id: string;
   name: string | null;
@@ -236,6 +235,7 @@ export interface TechniqueDetail {
   }[];
 }
 
+// One IOC value, how often it appears, and in which posts
 export interface IocAggItem {
   ioc_type: string;
   value: string;
@@ -250,8 +250,7 @@ export interface IocList {
   items: IocAggItem[];
 }
 
-/** A pipeline job: one end-to-end run triggered by pasting an .onion URL.
- *  scrape (HTML) -> extract -> LLM -> MITRE -> mitigations. */
+/** Scrape job: scrape -> extract -> LLM -> MITRE for one .onion URL. */
 export interface ScrapeJob {
   id: number;
   onion_url: string;
@@ -270,6 +269,7 @@ export interface ScrapeJob {
   finished_at: number | null;
 }
 
+// One search result on the Discover page
 export interface DiscoverResult {
   engine: string;
   title: string;
@@ -280,6 +280,7 @@ export interface DiscoverResult {
   score: number;
 }
 
+// Full Discover response (results + per-engine errors)
 export interface DiscoverResponse {
   query: string;
   refined: string | null;
@@ -288,6 +289,7 @@ export interface DiscoverResponse {
   errors: Record<string, string>;
 }
 
+// A watchlist and its alert counts
 export interface Watchlist {
   id: number;
   name: string;
@@ -297,6 +299,7 @@ export interface Watchlist {
   unseen: number;
 }
 
+// One alert: a post that mentions a watched term
 export interface Alert {
   id: number;
   watchlist_id: number;
@@ -311,6 +314,7 @@ export interface Alert {
   intent: string | null;
 }
 
+// Every API call the frontend makes, in one place
 export const api = {
   healthz: () => get<{ status: string }>("/healthz"),
   healthzFull: () => get<HealthFull>("/healthz/full"),
@@ -335,6 +339,7 @@ export const api = {
   scrapeJob: (id: number) => get<ScrapeJob>(`/scrape-jobs/${id}`),
   watchlists: () => get<{ items: Watchlist[] }>("/watchlists"),
   createWatchlist: (body: { name: string; terms: string[] }) => post<Watchlist>("/watchlists", body),
+  // DELETE has no JSON body to read, so it's written out by hand
   deleteWatchlist: async (id: number): Promise<void> => {
     const r = await fetch(`${BASE}/watchlists/${id}`, { method: "DELETE", headers: writeHeaders() });
     if (!r.ok && r.status !== 204) throw new Error(`${r.status} ${r.statusText}`);
@@ -353,6 +358,7 @@ export const api = {
     source?: string;
     skip_llm?: boolean;
   }) => post<ScrapeJob>("/scrape-jobs", body),
+  // Plain link: the browser downloads the PDF directly
   exportInvestigationUrl: (id: number) =>
     `${BASE}/investigations/${id}/export`,
   deleteInvestigation: async (id: number): Promise<void> => {

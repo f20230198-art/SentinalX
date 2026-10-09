@@ -5,6 +5,7 @@ import sqlite3
 from backend.db.store import Store
 
 
+# Helper: build a fake post dict
 def post(pid: int, ts: float, **kw) -> dict:
     return {"id": pid, "thread_id": 1, "thread_title": "t", "category": "c",
             "author": "a", "body": "b", "created_at": ts, **kw}
@@ -29,15 +30,13 @@ def test_cursor_is_scoped_per_source(tmp_path):
     s.insert_posts([post(1, 100.0)], source="darkbay")
     s.insert_posts([post(1, 50.0)], source="silkvault")
     assert s.get_cursor(source="darkbay") == 100.0
-    # Before the fix, SilkVault crawls used the global cursor (100) and
-    # silently skipped every SilkVault post with a timestamp <= 100.
+    # Regression: SilkVault used to use the global cursor and skip its posts
     assert s.get_cursor(source="silkvault") == 50.0
     assert s.get_cursor() == 100.0
 
 
 def test_migrates_old_global_unique_schema(tmp_path):
-    """A DB created with the old UNIQUE(source_post_id) is rebuilt in place,
-    keeping row ids so child rows (iocs) still point at the right post."""
+    """Old DB with global UNIQUE(source_post_id) is migrated, keeping row ids."""
     db = tmp_path / "old.db"
     c = sqlite3.connect(db)
     c.executescript("""

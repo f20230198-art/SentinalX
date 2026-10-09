@@ -3,20 +3,13 @@ import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { api, type HealthFull } from "../lib/api";
 
-/* ----------------------------------------------------------------------- *
- * Header status pill. Polls /healthz/full every 12s.
- *
- * Three honest states, not two:
- *   Live         — database, LLM and Tor all up
- *   Cached mode  — database up, LLM and/or Tor offline: everything stored is
- *                  still browsable, only new enrichment/scraping pauses
- *   Down         — database unreachable (the only fatal case)
- * ----------------------------------------------------------------------- */
+/* Header status pill (checks /healthz/full every 12s): Live / Cached mode (LLM or Tor off) / Down (DB off) */
 
 const POLL_MS = 12_000;
 
 type Mode = "live" | "cached" | "down" | "checking";
 
+// Decide the status: DB down = down; LLM or Tor down = cached; all up = live
 function modeOf(h: HealthFull | undefined, loading: boolean, failed: boolean): Mode {
   if (loading) return "checking";
   if (failed || h?.checks.db?.status !== "up") return "down";
@@ -27,6 +20,7 @@ function modeOf(h: HealthFull | undefined, loading: boolean, failed: boolean): M
 export function WatchIndicator() {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  // Ask the backend for health every 12s
   const q = useQuery({
     queryKey: ["healthz", "full"],
     queryFn: api.healthzFull,
@@ -34,10 +28,12 @@ export function WatchIndicator() {
     refetchOnWindowFocus: true,
   });
   const mode = modeOf(q.data, q.isLoading, q.isError);
+  // Posts still waiting in any pipeline stage
   const p = q.data?.checks.pipeline;
   const pending =
     Number(p?.pending_extraction ?? 0) + Number(p?.pending_llm ?? 0) + Number(p?.pending_mitre ?? 0);
 
+  // Colour for each status
   const tone = {
     live: "text-ok border-ok/40",
     cached: "text-warn border-warn/40",
@@ -46,6 +42,7 @@ export function WatchIndicator() {
   }[mode];
 
   return (
+    // Pill (dot + status + queued count); hovering or clicking opens the details popup
     <div className="relative" onMouseLeave={() => setOpen(false)}>
       <button
         onClick={() => setOpen((v) => !v)}
@@ -64,6 +61,7 @@ export function WatchIndicator() {
         {pending > 0 && <span className="font-normal tabular-nums text-text-muted">· {pending} queued</span>}
       </button>
 
+      {/* Details popup: one row per service, plus the queue */}
       {open && (
         <div
           id="watch-popover"

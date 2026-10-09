@@ -1,17 +1,5 @@
-"""LLM analysis pipeline entrypoint.
-
-Reads posts that have been extracted but not yet LLM-analysed, runs the
-4-prompt chain over each, and persists the result.
-
-Cursor:
-    Posts where raw_posts.processed_at IS NOT NULL  (extraction done)
-    AND raw_post_id is not in post_processing_state for stage 'llm'.
-
-Usage:
-    python -m backend.llm.run --once
-    python -m backend.llm.run --once --limit 5         (smoke test)
-    python -m backend.llm.run --watch --interval 60
-    python -m backend.llm.run --reset                  (drop llm tables, replay)
+"""LLM stage: run the 4-prompt chain on extracted posts and save results.
+Run: python -m backend.llm.run --once | --watch | --reset
 """
 
 from __future__ import annotations
@@ -28,6 +16,7 @@ from backend.db.store import Store
 from backend.llm.chain import Analysis, analyse_post_async
 from backend.llm.client import AsyncOllamaClient, OllamaError
 
+# Name of this stage in post_processing_state
 STAGE = "llm"
 
 log = logging.getLogger("sentinelx.llm")
@@ -41,12 +30,9 @@ def _setup_logging(verbose: bool) -> None:
     )
 
 
+# Posts that finished extraction but haven't been through the LLM yet
 def _fetch_unanalysed(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
-    # COALESCE(body_en, body): for non-English posts the extraction step
-    # stored an English translation in body_en — feed that to the LLM so the
-    # 4-prompt chain always reasons over English. English posts have body_en
-    # NULL and fall back to the original body. Aliased `body` so the rest of
-    # this module (and chain.py) needs no change.
+    # Use the English translation if there is one
     return conn.execute(
         """
         SELECT rp.id, rp.thread_title, rp.category,
@@ -64,6 +50,7 @@ def _fetch_unanalysed(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]
     ).fetchall()
 
 
+# IOCs and entities already found for this post (given to the LLM as known facts)
 def _fetch_facts(conn: sqlite3.Connection, raw_post_id: int) -> tuple[list[dict], list[dict]]:
     iocs = [dict(r) for r in conn.execute(
         "SELECT ioc_type, value FROM iocs WHERE raw_post_id = ?", (raw_post_id,)
@@ -74,6 +61,7 @@ def _fetch_facts(conn: sqlite3.Connection, raw_post_id: int) -> tuple[list[dict]
     return iocs, ents
 
 
+# Save (or overwrite) the LLM results for one post
 def _persist(conn: sqlite3.Connection, raw_post_id: int, model: str, a: Analysis) -> None:
     now = time.time()
     conn.execute(
@@ -102,6 +90,7 @@ def _persist(conn: sqlite3.Connection, raw_post_id: int, model: str, a: Analysis
             json.dumps({k: {"response": v.get("response", "")} for k, v in a.raw_responses.items()}),
         ),
     )
+    # Mark this post as done for the LLM stage
     conn.execute(
         "INSERT OR REPLACE INTO post_processing_state (raw_post_id, stage, processed_at) "
         "VALUES (?, ?, ?)",
@@ -116,6 +105,7 @@ async def _analyse_one(
     iocs: list[dict],
     ents: list[dict],
 ) -> tuple[sqlite3.Row, Analysis, float]:
+    # The semaphore limits how many posts run at the same time
     async with sem:
         t0 = time.time()
         a = await analyse_post_async(
@@ -130,12 +120,8 @@ async def process_batch_async(
     batch_size: int,
     concurrency: int,
 ) -> tuple[int, int, int]:
-    """Process up to batch_size unanalysed posts. Returns (seen, ok, failed).
-
-    `concurrency` posts are in-flight at once. Within each post, the 4 prompts
-    fire concurrently via analyse_post_async — so peak in-flight Ollama requests
-    is concurrency * 4. Tune downward if Ollama starts queueing aggressively.
-    """
+    """Analyse up to batch_size posts (`concurrency` at once); returns (seen, ok, failed)."""
+    # Log this run in llm_runs
     conn = store.conn
     started = time.time()
     cur = conn.execute(
@@ -148,13 +134,13 @@ async def process_batch_async(
     seen = ok = failed = 0
     err: str | None = None
 
+    # Get the next posts to analyse
     try:
         rows = _fetch_unanalysed(conn, batch_size)
         seen = len(rows)
         if rows:
             sem = asyncio.Semaphore(concurrency)
-            # Pre-fetch facts on the (sync) DB connection before spawning tasks
-            # so coroutines never touch sqlite concurrently.
+            # Load DB data first so async tasks never touch SQLite
             jobs = []
             for row in rows:
                 iocs, ents = _fetch_facts(conn, row["id"])
@@ -162,6 +148,7 @@ async def process_batch_async(
                          row["id"], row["category"], len(iocs), len(ents))
                 jobs.append(_analyse_one(sem, client, row, iocs, ents))
 
+            # Save each post as soon as its analysis finishes
             for fut in asyncio.as_completed(jobs):
                 row, a, elapsed = await fut
                 if a.ok:
@@ -174,11 +161,13 @@ async def process_batch_async(
                                 row["id"], elapsed, a.errors)
                 _persist(conn, row["id"], client.model, a)
                 conn.commit()
+    # On error, keep what was saved and re-raise
     except Exception as e:
         err = repr(e)
         conn.commit()
         raise
     finally:
+        # Always finish the llm_runs log row
         conn.execute(
             "UPDATE llm_runs SET finished_at = ?, posts_seen = ?, "
             "posts_completed = ?, posts_failed = ?, error = ? WHERE id = ?",
@@ -193,6 +182,7 @@ async def run_once_async(
     store: Store, client: AsyncOllamaClient,
     batch: int, concurrency: int, limit: int | None,
 ) -> None:
+    # Keep processing batches until no posts are left (or the limit is reached)
     total = 0
     while True:
         remaining = (limit - total) if limit is not None else batch
@@ -211,6 +201,7 @@ async def run_watch_async(
 ) -> None:
     log.info("watch mode: every %.1fs concurrency=%d (Ctrl-C to stop)",
              interval, concurrency)
+    # Repeat forever, waiting `interval` seconds between runs
     while True:
         try:
             await run_once_async(store, client, batch, concurrency, limit=None)
@@ -219,6 +210,7 @@ async def run_watch_async(
         await asyncio.sleep(interval)
 
 
+# Delete all LLM results so every post gets re-analysed
 def reset_llm(store: Store) -> None:
     store.conn.executescript(
         "DELETE FROM llm_analyses; DELETE FROM llm_runs;"
@@ -229,6 +221,7 @@ def reset_llm(store: Store) -> None:
 
 
 async def _amain(args, store: Store) -> int:
+    # Check Ollama is running and has the model before starting
     client = AsyncOllamaClient(model=args.model)
     try:
         installed = await client.health()
@@ -242,6 +235,7 @@ async def _amain(args, store: Store) -> int:
         return 1
     log.info("ollama ok, using model=%s concurrency=%d", args.model, args.concurrency)
 
+    # Run once or keep watching for new posts
     try:
         if args.watch:
             await run_watch_async(
@@ -257,6 +251,7 @@ async def _amain(args, store: Store) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Command-line options
     p = argparse.ArgumentParser(prog="sentinelx-llm")
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--once", action="store_true",
@@ -281,6 +276,7 @@ def main(argv: list[str] | None = None) -> int:
 
     store = Store(args.db) if args.db else Store()
 
+    # --reset: wipe LLM results and exit
     if args.reset:
         reset_llm(store)
         log.info("llm state reset")

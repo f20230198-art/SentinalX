@@ -15,24 +15,13 @@ import {
 import type { PostDetail } from "../lib/api";
 import { INK, MUTED, PAPER, iocColor } from "../lib/palette";
 
-/* ----------------------------------------------------------------------- *
- * Evidence graph — posts, the indicators they contain, and the ATT&CK
- * techniques they map to, on one force-directed canvas.
- *
- * Shared indicators/techniques are single nodes, so posts that share evidence
- * pull together into clusters: the picture IS the correlation.
- *
- * Interaction:
- *   hover        highlight a node and its direct neighbours
- *   click        post → open its evidence; indicator/technique → pin its
- *                cluster (click again or Esc to release); double-click an
- *                indicator → pivot to it
- *   drag         reposition a node; it stays where you drop it
- *   keyboard     every node is focusable; Enter = click
- * ----------------------------------------------------------------------- */
+/* Force graph of posts, IOCs and techniques; shared nodes pull related posts together.
+ * Hover = highlight, click = open/pin, double-click IOC = pivot, drag = move. */
 
+// Three node types: post, IOC, MITRE technique
 type Kind = "post" | "ioc" | "mitre";
 
+// One dot in the graph (d3 adds x/y positions to it)
 interface GNode extends SimulationNodeDatum {
   id: string;
   kind: Kind;
@@ -43,6 +32,7 @@ interface GNode extends SimulationNodeDatum {
   techniqueName?: string;
   degree: number;
 }
+// A line between a post and one of its IOCs/techniques
 type GLink = SimulationLinkDatum<GNode> & { source: string | GNode; target: string | GNode };
 
 export function EvidenceGraph({
@@ -57,18 +47,23 @@ export function EvidenceGraph({
   /** Pre-pin a technique cluster (e.g. the Home page's featured finding). */
   focusTechnique?: string;
 }) {
+  // Drawing area size
   const W = 1200;
   const H = height;
   const navigate = useNavigate();
   const svgRef = useRef<SVGSVGElement | null>(null);
   const simRef = useRef<Simulation<GNode, GLink> | null>(null);
+  // Changing `tick` re-renders the graph as d3 moves the nodes
   const [, setTick] = useState(0);
+  // Node under the mouse, and node clicked to stay highlighted
   const [hover, setHover] = useState<string | null>(null);
   const [pinned, setPinned] = useState<string | null>(focusTechnique ? `mitre:${focusTechnique}` : null);
 
+  // Build nodes and links from the posts; the same IOC/technique is one shared node
   const { nodes, links, adj } = useMemo(() => {
     const ns = new Map<string, GNode>();
     const ls: GLink[] = [];
+    // Add a node, or if it already exists just count one more link to it
     const add = (n: Omit<GNode, "degree">) => {
       const ex = ns.get(n.id);
       if (ex) {
@@ -77,6 +72,7 @@ export function EvidenceGraph({
       }
       ns.set(n.id, { ...n, degree: 1 });
     };
+    // For each post: a post node, plus links to its IOCs and techniques
     for (const p of posts) {
       const pid = `post:${p.post.id}`;
       add({ id: pid, kind: "post", postId: p.post.id, label: p.post.thread_title || `#${p.post.id}` });
@@ -92,6 +88,7 @@ export function EvidenceGraph({
         ls.push({ source: pid, target: k });
       }
     }
+    // Neighbour list for each node (used for highlighting)
     const a = new Map<string, Set<string>>();
     for (const l of ls) {
       const s = String(l.source), t = String(l.target);
@@ -103,6 +100,7 @@ export function EvidenceGraph({
     return { nodes: [...ns.values()], links: ls, adj: a };
   }, [posts]);
 
+  // Start the physics: nodes repel, links pull, everything drifts to the centre
   useEffect(() => {
     if (!nodes.length) return;
     const sim = forceSimulation<GNode>(nodes)
@@ -124,6 +122,7 @@ export function EvidenceGraph({
     return () => void sim.stop();
   }, [nodes, links, H]);
 
+  // Esc un-pins the highlighted node
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && setPinned(null);
     window.addEventListener("keydown", onKey);
@@ -132,6 +131,7 @@ export function EvidenceGraph({
 
   // ---- drag (pointer events; converts screen → SVG coordinates) ---------
   const drag = useRef<{ node: GNode; moved: boolean } | null>(null);
+  // Mouse position -> graph coordinates
   const toSvg = (e: React.PointerEvent) => {
     const svg = svgRef.current!;
     const pt = svg.createSVGPoint();
@@ -139,11 +139,13 @@ export function EvidenceGraph({
     pt.y = e.clientY;
     return pt.matrixTransform(svg.getScreenCTM()!.inverse());
   };
+  // Start dragging: wake up the physics
   const onDown = (n: GNode) => (e: React.PointerEvent) => {
     (e.target as Element).setPointerCapture(e.pointerId);
     drag.current = { node: n, moved: false };
     simRef.current?.alphaTarget(0.25).restart();
   };
+  // While dragging: pin the node to the mouse
   const onMove = (e: React.PointerEvent) => {
     if (!drag.current) return;
     const p = toSvg(e);
@@ -157,16 +159,19 @@ export function EvidenceGraph({
     setTimeout(() => (drag.current = null), 0);
   };
 
+  // Click: a post opens its details; anything else pins/unpins its cluster
   const activate = (n: GNode) => {
     if (drag.current?.moved) return;
     if (n.kind === "post" && n.postId !== undefined) onSelectPost(n.postId);
     else setPinned((p) => (p === n.id ? null : n.id));
   };
 
+  // Highlight the hovered (or pinned) node and its neighbours; dim everything else
   const focus = hover ?? pinned;
   const lit = (id: string) => !focus || id === focus || (adj.get(focus)?.has(id) ?? false);
   const pinnedNode = pinned ? nodes.find((n) => n.id === pinned) : undefined;
 
+  // Nothing to draw
   if (!nodes.length) {
     return <p className="border border-dashed border-border-soft p-8 text-sm text-text-muted">No evidence to draw yet.</p>;
   }
@@ -174,6 +179,7 @@ export function EvidenceGraph({
   return (
     <figure className="m-0">
       <div className="relative border border-text bg-surface-1">
+        {/* Info box for the pinned node */}
         {pinnedNode && (
           <div className="absolute top-3 left-3 z-10 max-w-sm border border-text bg-surface-1 px-3 py-2 text-sm shadow-[0_4px_16px_rgba(0,0,0,0.45)]">
             <span className="font-mono font-semibold">{pinnedNode.label}</span>
@@ -201,6 +207,7 @@ export function EvidenceGraph({
           role="group"
           aria-label="Evidence graph of posts, indicators and ATT&CK techniques"
         >
+          {/* Lines first, so dots are drawn on top */}
           {links.map((l, i) => {
             const s = l.source as GNode, t = l.target as GNode;
             if (typeof s !== "object") return null;
@@ -216,8 +223,10 @@ export function EvidenceGraph({
             );
           })}
 
+          {/* Nodes: posts = circles, IOCs = diamonds, techniques = boxes */}
           {nodes.map((n) => {
             const on = lit(n.id);
+            // Mouse/keyboard handlers shared by every node
             const common = {
               transform: `translate(${n.x ?? 0},${n.y ?? 0})`,
               style: { cursor: "pointer", opacity: on ? 1 : 0.15, transition: "opacity 160ms" } as React.CSSProperties,
@@ -232,8 +241,7 @@ export function EvidenceGraph({
               onFocus: () => setHover(n.id),
               onBlur: () => setHover(null),
             };
-            // Posts: full title only for the node under the pointer; neighbours of a
-            // focused node get just "#id" so a busy cluster stays readable.
+            // Full title only for the hovered post; neighbours just show "#id"
             const isFocus = n.id === focus;
             const showLabel = n.kind === "post" ? on && (!!focus || nodes.length < 40) : on && (n.degree > 1 || isFocus);
             if (n.kind === "post")
@@ -273,6 +281,7 @@ export function EvidenceGraph({
           })}
         </svg>
       </div>
+      {/* Legend */}
       <figcaption className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-text-muted">
         <span><span className="mr-1.5 inline-block h-3 w-3 rounded-full bg-text align-middle" />Post</span>
         <span><span className="mr-1.5 inline-block h-2.5 w-2.5 rotate-45 bg-info align-middle" />Indicator (colour = type)</span>
@@ -283,4 +292,5 @@ export function EvidenceGraph({
   );
 }
 
+// Shorten long labels with "…"
 const trunc = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + "…" : s);

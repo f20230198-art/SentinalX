@@ -1,28 +1,5 @@
-"""Evaluation harness: how accurate is SentinelX, measured, not claimed.
-
-Three evaluations, written to backend/eval/EVAL_REPORT.md:
-
-1. IOC extraction — on synthetic cases with ground truth by construction
-   (ioc_cases.py). Per-type precision / recall / F1, plus an ablation showing
-   what the Public-Suffix-List domain filter is worth.
-
-2. Intent classification — the stored LLM intent vs the hand-labelled gold
-   set (gold_posts.json): accuracy on all posts and on unambiguous ones,
-   plus the confusion pairs.
-
-3. MITRE technique mapping — micro precision / recall / F1 of four
-   strategies on the gold set, all scored at parent-technique level:
-     * LLM raw        every T-code Mistral proposed (incl. invalid ones)
-     * LLM verified   only proposals that exist in the ATT&CK corpus
-     * Semantic only  MiniLM cosine top-k over chunked posts, no LLM
-     * Hybrid         verified ∪ semantic — what the pipeline stores
-   plus a threshold sweep for the semantic matcher (why 0.45?).
-
-No Ollama needed: LLM outputs are read from llm_analyses (already stored).
-The embedding model must be available locally (HF cache).
-
-Usage:
-    python -m backend.eval.run
+"""Accuracy report: IOC extraction, intent, and MITRE mapping vs gold data.
+Run: python -m backend.eval.run  (writes backend/eval/EVAL_REPORT.md)
 """
 
 from __future__ import annotations
@@ -40,15 +17,18 @@ from backend.mitre import embed as embed_mod
 from backend.mitre import match as match_mod
 from backend.pipeline import extract as extract_mod
 
+# Input files (DB, hand-labelled gold posts) and the report we write
 HERE = Path(__file__).resolve().parent
 DB_PATH = HERE.parent / "db" / "sentinelx.db"
 GOLD = HERE / "gold_posts.json"
 REPORT = HERE / "EVAL_REPORT.md"
 
+# Same settings the pipeline uses for semantic matching
 TOPK = 5
 THRESHOLD = 0.45
 
 
+# Precision, recall and F1 from true positives, false positives, false negatives
 def prf(tp: int, fp: int, fn: int) -> tuple[float, float, float]:
     p = tp / (tp + fp) if tp + fp else 0.0
     r = tp / (tp + fn) if tp + fn else 0.0
@@ -66,6 +46,7 @@ def fmt(x: float) -> str:
 
 def eval_iocs(psl_filter: bool = True) -> tuple[dict[str, list[int]], list[str]]:
     """Returns per-type [tp, fp, fn] and up to 5 example false positives."""
+    # Optionally switch off the real-domain check to show how much it helps
     original = extract_mod._is_real_domain
     if not psl_filter:
         extract_mod._is_real_domain = lambda _c: True   # ablation: pre-fix behaviour
@@ -73,10 +54,12 @@ def eval_iocs(psl_filter: bool = True) -> tuple[dict[str, list[int]], list[str]]
         ext = extract_mod.IOCExtractor()
         counts: dict[str, list[int]] = {}
         fps: list[str] = []
+        # Compare what the extractor found with the known answer for each case
         for case in build_cases():
             got = {(m.type, m.value) for m in ext.extract(case.text)}
             for t, v in got | case.expected:
                 c = counts.setdefault(t, [0, 0, 0])
+                # tp = found and correct, fp = found but wrong, fn = missed
                 if (t, v) in got and (t, v) in case.expected:
                     c[0] += 1
                 elif (t, v) in got:
@@ -94,6 +77,7 @@ def eval_iocs(psl_filter: bool = True) -> tuple[dict[str, list[int]], list[str]]
 # 2 + 3. Intent and techniques on the gold set
 # --------------------------------------------------------------------------- #
 
+# T1566.001 -> T1566 (we score at the parent technique level)
 def parent(tcode: str) -> str:
     return tcode.split(".")[0]
 
@@ -102,6 +86,7 @@ def load_gold() -> list[dict]:
     return json.loads(GOLD.read_text(encoding="utf-8"))["posts"]
 
 
+# Compare the LLM's stored intent with the gold label for each post
 def eval_intent(conn: sqlite3.Connection, gold: list[dict]) -> dict:
     rows = {r["raw_post_id"]: r["intent"] for r in conn.execute(
         "SELECT raw_post_id, intent FROM llm_analyses")}
@@ -122,6 +107,7 @@ def eval_intent(conn: sqlite3.Connection, gold: list[dict]) -> dict:
             "confusions": confusions.most_common()}
 
 
+# Score 4 ways of picking techniques against the gold labels
 def eval_techniques(conn: sqlite3.Connection, gold: list[dict]) -> dict:
     ids = [g["id"] for g in gold]
     corpus_ids, matrix, corpus_set = match_mod.load_corpus(conn)
@@ -146,6 +132,7 @@ def eval_techniques(conn: sqlite3.Connection, gold: list[dict]) -> dict:
                                      topk=TOPK, threshold=thr, exclude=exclude)
         return {parent(m.technique_id) for m in ms}
 
+    # Counters per strategy, plus a sweep over thresholds
     strategies = {"LLM raw": [0, 0, 0], "LLM verified": [0, 0, 0],
                   "Semantic only": [0, 0, 0], "Hybrid (stored by pipeline)": [0, 0, 0]}
     sweep = {t: [0, 0, 0] for t in (0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60)}
@@ -155,6 +142,7 @@ def eval_techniques(conn: sqlite3.Connection, gold: list[dict]) -> dict:
         acc[1] += len(pred - truth)
         acc[2] += len(truth - pred)
 
+    # For each gold post, score every strategy
     for g in gold:
         pid, truth = g["id"], {parent(t) for t in g["techniques"]}
         cands = match_mod.parse_llm_candidates(rows[pid]["techniques_json"])
@@ -178,6 +166,7 @@ def eval_techniques(conn: sqlite3.Connection, gold: list[dict]) -> dict:
 # --------------------------------------------------------------------------- #
 
 def main() -> int:
+    # Open the DB read-only and run all evaluations
     conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     gold = load_gold()
@@ -187,6 +176,7 @@ def main() -> int:
     intent = eval_intent(conn, gold)
     tech = eval_techniques(conn, gold)
 
+    # Build the markdown report line by line
     L: list[str] = []
     L.append("# SentinelX — Evaluation Report\n")
     L.append("Generated by `python -m backend.eval.run`. Re-run after any change to "
@@ -194,6 +184,7 @@ def main() -> int:
     L.append("> ⚠ Gold intent/technique labels in `gold_posts.json` are a DRAFT and "
              "must be reviewed by a human before these numbers are quoted.\n")
 
+    # Section 1: IOC table + effect of the domain filter
     L.append("## 1. IOC extraction (80 synthetic cases, ground truth by construction)\n")
     L.append("| Type | TP | FP | FN | Precision | Recall | F1 |")
     L.append("|---|---|---|---|---|---|---|")
@@ -213,6 +204,7 @@ def main() -> int:
              f"{fmt(dp_b[0])} → {fmt(dp_a[0])} (recall {fmt(dp_b[1])} → {fmt(dp_a[1])}). "
              f"False positives removed include: `{'`, `'.join(f for f in fps_before if f.startswith('domain'))}`.\n")
 
+    # Section 2: intent accuracy
     L.append("## 2. Intent classification (stored Mistral output vs gold)\n")
     L.append(f"- All posts: **{intent['correct']}/{intent['total']} = "
              f"{fmt(intent['correct'] / intent['total'])}**")
@@ -223,6 +215,7 @@ def main() -> int:
             f"{g}→{p} ×{n}" for (g, p), n in intent["confusions"]))
     L.append("")
 
+    # Section 3: technique strategies + threshold sweep
     L.append(f"## 3. MITRE technique mapping ({len(gold)} gold posts, parent-technique level)\n")
     L.append("| Strategy | TP | FP | FN | Precision | Recall | F1 |")
     L.append("|---|---|---|---|---|---|---|")
@@ -239,6 +232,7 @@ def main() -> int:
         L.append(f"| {thr:.2f} | {fmt(p)} | {fmt(r)} | {fmt(f)}{mark} |")
     L.append("")
 
+    # Save the report and print it
     REPORT.write_text("\n".join(L) + "\n", encoding="utf-8")
     print("\n".join(L))
     return 0

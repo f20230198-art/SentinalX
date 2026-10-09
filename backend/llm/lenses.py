@@ -1,21 +1,11 @@
-"""Cross-post analysis lenses.
-
-A lens is a system prompt + output template that re-reads a set of posts
-through a particular analyst's perspective. The same 235-post corpus told
-through the `ransomware` lens looks different from the `personal_identity`
-lens because each one filters and re-frames the same evidence.
-
-The four lenses are inspired by Robin's preset prompts (apurvsinghgautam/robin,
-llm.py PRESET_PROMPTS) but rewritten to reference SentinelX's own structured
-data — the LLM receives the IOCs, entities, and MITRE techniques we already
-extracted, instead of having to find them in raw text again.
-"""
+"""Lenses: prompts that summarise a set of posts from one analyst angle (e.g. ransomware)."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 
+# A lens = name, label/description for the UI, and the system prompt the LLM gets
 @dataclass(frozen=True)
 class Lens:
     name: str
@@ -24,6 +14,7 @@ class Lens:
     system: str
 
 
+# The 4 available lenses
 LENSES: dict[str, Lens] = {
     "threat_intel": Lens(
         name="threat_intel",
@@ -124,12 +115,14 @@ LENSES: dict[str, Lens] = {
 }
 
 
+# Look up a lens by name (error if it doesn't exist)
 def get_lens(name: str) -> Lens:
     if name not in LENSES:
         raise KeyError(f"unknown lens '{name}'. choices: {sorted(LENSES)}")
     return LENSES[name]
 
 
+# Lens list for the UI (without the long prompts)
 def list_lenses() -> list[dict]:
     return [
         {"name": l.name, "label": l.label, "description": l.description}

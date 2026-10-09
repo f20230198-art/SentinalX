@@ -1,6 +1,4 @@
-# Synthetic darknet forum image.
-# Slim Python base; gunicorn serves the Flask app on :5000 inside the container.
-# Tor (separate container) reverse-proxies the .onion address to this port.
+# DarkBay forum image: Flask app served by gunicorn on :5000 (Tor exposes it as .onion)
 
 FROM python:3.12-slim
 
@@ -22,6 +20,5 @@ VOLUME ["/data"]
 
 EXPOSE 5000
 
-# Seed the DB on first boot if it's missing, then hand off to gunicorn.
-# `exec` so gunicorn becomes PID 1 and signals (SIGTERM) propagate cleanly.
+# Seed the DB on first boot, then start gunicorn
 CMD ["sh", "-c", "if [ ! -f \"$FORUM_DB\" ]; then python seed_data.py --reset --count 60 --seed 42; fi && exec gunicorn -w 2 -b 0.0.0.0:5000 --access-logfile - app:app"]

@@ -1,24 +1,5 @@
-"""IOC + named-entity extraction over scraped post bodies.
-
-IOC types:
-    ipv4, ipv6, cve, md5, sha1, sha256, btc, url, domain, email
-
-Defanging:
-    Threat-intel writeups commonly defang IOCs so they can't be clicked or
-    auto-resolved. We refang into a working copy before regex matching:
-        1.2.3[.]4   ->  1.2.3.4
-        1.2.3(.)4   ->  1.2.3.4
-        hxxp://     ->  http://
-        hxxps://    ->  https://
-        evil[.]com  ->  evil.com
-    Spans returned are over the *refanged* string. Storing both the original
-    and refanged spans is overkill for our purposes; the value itself is what
-    downstream stages care about.
-
-Entities:
-    spaCy en_core_web_sm for ORG / PERSON / PRODUCT / GPE / NORP / EVENT.
-    A small curated keyword pass for MALWARE and THREAT_ACTOR — spaCy out of
-    the box does not know what "Cobalt Strike" or "Lazarus Group" is.
+"""Extract IOCs (IPs, hashes, CVEs, BTC, URLs, domains, emails) and named entities from posts.
+Defanged IOCs like 1.2.3[.]4 or hxxp:// are fixed before matching.
 """
 
 from __future__ import annotations
@@ -30,18 +11,12 @@ from typing import Iterable
 import spacy
 import tldextract
 
-# Public Suffix List check for domain candidates. suffix_list_urls=() makes
-# tldextract use its bundled PSL snapshot — no network call, ever.
+# Offline public-suffix list, to check if a domain is real
 _TLD = tldextract.TLDExtract(suffix_list_urls=())
 
 
 def _is_real_domain(candidate: str) -> bool:
-    """True only if the candidate ends in a real public suffix.
-
-    The domain regex alone matches anything shaped like `word.word`, so
-    `node.js`, `file.exe`, or `config.yaml` would be reported as domains.
-    Requiring a registered suffix (com, xyz, co.uk, …) removes those.
-    """
+    """True only if it ends in a real suffix (so node.js / file.exe aren't domains)."""
     ext = _TLD(candidate)
     return bool(ext.suffix) and bool(ext.domain)
 
@@ -54,35 +29,35 @@ _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 # IPv6: simplified — 2+ colons, hex groups. Good enough for forum text.
 _IPV6_RE = re.compile(r"\b(?:[A-Fa-f0-9]{1,4}:){2,7}[A-Fa-f0-9]{1,4}\b")
 
+# CVE ids like CVE-2024-12345
 _CVE_RE = re.compile(r"\bCVE-\d{4}-\d{4,7}\b", re.IGNORECASE)
 
+# File hashes (by length: 32 = MD5, 40 = SHA1, 64 = SHA256)
 _MD5_RE = re.compile(r"\b[a-fA-F0-9]{32}\b")
 _SHA1_RE = re.compile(r"\b[a-fA-F0-9]{40}\b")
 _SHA256_RE = re.compile(r"\b[a-fA-F0-9]{64}\b")
 
-# Bitcoin: legacy P2PKH/P2SH (1.., 3..) and bech32 (bc1..). Not exhaustive but
-# covers the formats most darknet markets advertise.
+# Bitcoin addresses (legacy 1.../3... and bech32 bc1...)
 _BTC_RE = re.compile(r"\b(?:bc1[a-z0-9]{25,62}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})\b")
 
+# http(s) links
 _URL_RE = re.compile(r"\bhttps?://[^\s<>\"'\)]+", re.IGNORECASE)
 
 # Email: pragmatic, not RFC 5322 perfect.
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 
-# Domain: hostname with at least one dot and a 2-24 char TLD. Run last and
-# subtract anything already matched as URL/email to avoid double-counting.
+# Domains (matched last; skip ones already found as URL/email)
 _DOMAIN_RE = re.compile(
     r"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[A-Za-z]{2,24}\b"
 )
 
-# Curated keyword lists. Tiny on purpose — the MITRE matcher (vector index)
-# is where real coverage comes from. These are just enough to give the seed
-# data named-entity hits before the LLM and MITRE stages run.
+# Small hand-picked malware / threat-actor names spaCy doesn't know
 _MALWARE_TERMS = {
     "Cobalt Strike", "Mimikatz", "Emotet", "TrickBot", "Ryuk", "Conti",
     "LockBit", "BlackCat", "ALPHV", "REvil", "Sodinokibi", "Maze",
     "QakBot", "IcedID", "BumbleBee", "Raspberry Robin", "Pikabot",
 }
+# Known threat-actor group names
 _THREAT_ACTOR_TERMS = {
     "Lazarus Group", "APT28", "APT29", "APT41", "FIN7", "FIN11",
     "Sandworm", "Cozy Bear", "Fancy Bear", "Wizard Spider",
@@ -90,6 +65,7 @@ _THREAT_ACTOR_TERMS = {
 }
 
 
+# One thing we found: its type, the text, and where it is in the post
 @dataclass(frozen=True)
 class Match:
     type: str       # for IOCs: ioc_type; for entities: spaCy/custom label
@@ -99,6 +75,7 @@ class Match:
 
 # --- defanging -------------------------------------------------------------- #
 
+# Patterns that undo "defanging": [.] -> . , [at] -> @ , hxxp -> http
 _DEFANG_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\[\.\]"), "."),
     (re.compile(r"\(\.\)"), "."),
@@ -110,6 +87,7 @@ _DEFANG_PATTERNS: list[tuple[re.Pattern, str]] = [
 
 
 def refang(text: str) -> str:
+    # Apply every fix-up pattern to the text
     out = text
     for pat, repl in _DEFANG_PATTERNS:
         out = pat.sub(repl, out)
@@ -119,6 +97,7 @@ def refang(text: str) -> str:
 # --- IOC extractor ---------------------------------------------------------- #
 
 def _valid_ipv4(s: str) -> bool:
+    # Check each of the 4 parts is a number 0-255
     parts = s.split(".")
     if len(parts) != 4:
         return False
@@ -129,24 +108,29 @@ def _valid_ipv4(s: str) -> bool:
 
 
 class IOCExtractor:
+    # Run all IOC patterns over the text; returns every match found
     def extract(self, text: str) -> list[Match]:
+        # Fix defanged IOCs first
         t = refang(text)
         out: list[Match] = []
+        # Remember which parts of the text are already used by a match
         spans_consumed: list[tuple[int, int]] = []
 
+        # Helper: record a match and mark its text as used
         def add(ioc_type: str, m: re.Match, value: str | None = None) -> None:
             v = value if value is not None else m.group(0)
             out.append(Match(ioc_type, v, m.span()))
             spans_consumed.append(m.span())
 
         for m in _URL_RE.finditer(t):
-            # Sentence punctuation after a URL ("see https://x.io/a.") is not
-            # part of it.
+            # Drop trailing punctuation from URLs
             add("url", m, value=m.group(0).rstrip(".,;:!?"))
 
+        # Emails
         for m in _EMAIL_RE.finditer(t):
             add("email", m)
 
+        # IPv4 (only real ones, e.g. 999.1.1.1 is rejected)
         for m in _IPV4_RE.finditer(t):
             if _valid_ipv4(m.group(0)):
                 add("ipv4", m)
@@ -156,6 +140,7 @@ class IOCExtractor:
             if m.group(0).count(":") >= 2:
                 add("ipv6", m)
 
+        # CVE ids, always upper-case
         for m in _CVE_RE.finditer(t):
             add("cve", m, value=m.group(0).upper())
 
@@ -169,6 +154,7 @@ class IOCExtractor:
             if not _overlaps(m.span(), spans_consumed):
                 add("md5", m, value=m.group(0).lower())
 
+        # Bitcoin wallets
         for m in _BTC_RE.finditer(t):
             add("btc", m)
 
@@ -184,6 +170,7 @@ class IOCExtractor:
 
 
 def _overlaps(span: tuple[int, int], consumed: list[tuple[int, int]]) -> bool:
+    # True if this span overlaps any span already used
     s, e = span
     for cs, ce in consumed:
         if s < ce and cs < e:
@@ -193,26 +180,25 @@ def _overlaps(span: tuple[int, int], consumed: list[tuple[int, int]]) -> bool:
 
 # --- Entity extractor ------------------------------------------------------- #
 
-# spaCy labels we keep. PERSON/ORG/GPE/NORP/PRODUCT/EVENT are the ones with
-# CTI signal; the rest (DATE, CARDINAL, ORDINAL, ...) are noise here.
+# spaCy entity types worth keeping
 _KEEP_LABELS = {"PERSON", "ORG", "GPE", "NORP", "PRODUCT", "EVENT", "LOC"}
 
 
 class EntityExtractor:
+    # Finds names (people, orgs, places, products) with spaCy + our keyword lists
     def __init__(self, model: str = "en_core_web_sm") -> None:
-        # Disable the parser — we only need the NER component, and the parser
-        # is the slowest pipe in the small model.
+        # Only NER is needed; skip the slow parts
         self.nlp = spacy.load(model, disable=["parser", "lemmatizer"])
 
     def extract(self, text: str) -> list[Match]:
+        # spaCy's named entities, keeping only useful types
         doc = self.nlp(text)
         out: list[Match] = []
         for ent in doc.ents:
             if ent.label_ in _KEEP_LABELS:
                 out.append(Match(ent.label_, ent.text, (ent.start_char, ent.end_char)))
 
-        # Curated keyword pass. Case-sensitive on purpose — "Conti" the
-        # ransomware vs "conti" the substring is a real disambiguation.
+        # Case-sensitive on purpose ("Conti" vs "conti")
         for term in _MALWARE_TERMS:
             for m in re.finditer(rf"\b{re.escape(term)}\b", text):
                 out.append(Match("MALWARE", term, m.span()))
@@ -225,6 +211,7 @@ class EntityExtractor:
 
 # --- combined helper -------------------------------------------------------- #
 
+# Run both extractors on the same text
 def extract_all(
     text: str,
     ioc: IOCExtractor,
@@ -234,13 +221,10 @@ def extract_all(
 
 
 def dedupe(matches: Iterable[Match]) -> list[Match]:
-    """Collapse (type, value) duplicates within a single post.
-
-    We keep the first span we saw for each (type, value). The DB has the same
-    UNIQUE invariant, but pre-collapsing avoids one IntegrityError per dup.
-    """
+    """Remove duplicate (type, value) matches within one post."""
     seen: dict[tuple[str, str], Match] = {}
     for m in matches:
+        # Keep only the first match for each (type, value)
         key = (m.type, m.value)
         if key not in seen:
             seen[key] = m

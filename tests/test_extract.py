@@ -5,6 +5,7 @@ from backend.pipeline.extract import IOCExtractor, dedupe, refang
 ioc = IOCExtractor()
 
 
+# Helper: the values of one IOC type found in the text
 def values(text: str, ioc_type: str) -> set[str]:
     return {m.value for m in ioc.extract(text) if m.type == ioc_type}
 

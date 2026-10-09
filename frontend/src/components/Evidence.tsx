@@ -1,16 +1,10 @@
 import { PROVENANCE, type Provenance } from "../lib/palette";
 
-/* ----------------------------------------------------------------------- *
- * Evidence primitives shared by every page.
- *
- * Provenance is the product's core claim, so it gets one consistent mark:
- *   verified   ■ solid ink
- *   semantic   ▨ hatched blue
- *   unverified □ amber outline
- * Pattern + colour + text label, so it survives greyscale and colour-blindness.
- * ----------------------------------------------------------------------- */
+/* Shared evidence marks: verified = solid, semantic = hatched blue, unverified = amber outline */
 
+// Small square showing where a technique match came from
 export function ProvenanceMark({ source, size = 10 }: { source: string; size?: number }) {
+  // Unknown source -> draw nothing
   const p = PROVENANCE[source as Provenance];
   if (!p) return null;
   const style: React.CSSProperties = { display: "inline-block", width: size, height: size, flex: "none" };
@@ -19,6 +13,7 @@ export function ProvenanceMark({ source, size = 10 }: { source: string; size?: n
   return <span aria-hidden style={{ ...style, boxShadow: `inset 0 0 0 1.5px ${p.color}` }} />;
 }
 
+// Same mark plus its short name (full explanation on hover)
 export function ProvenanceLabel({ source }: { source: string }) {
   const p = PROVENANCE[source as Provenance];
   return (
@@ -72,6 +67,7 @@ export function ProvenanceBar({
   unverified: number;
   max: number;
 }) {
+  // Width of each part as a % of the biggest bar
   const pct = (n: number) => `${(100 * n) / Math.max(1, max)}%`;
   return (
     <div
@@ -96,6 +92,7 @@ export function QueryError({
   error?: unknown;
   onRetry?: () => void;
 }) {
+  // Show a friendlier message for network/server errors
   const msg = error instanceof Error ? error.message : "";
   return (
     <div role="alert" className="border border-danger/40 bg-surface-1 px-4 py-3 text-sm">

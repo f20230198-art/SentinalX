@@ -1,22 +1,5 @@
-"""Scraper entrypoint.
-
-Pulls posts from a synthetic .onion forum through Tor's SOCKS5 proxy,
-deduplicates them by source post id, and persists them into the local SQLite
-store at backend/db/sentinelx.db.
-
-Two scraper paths:
-  * JSON  (default) — the DarkBay forum exposes /api/posts; fast and clean.
-  * HTML  (--html)  — for forums with no API (SilkVault, real darknet forums);
-                      crawls and parses HTML pages with BeautifulSoup.
-
-Usage:
-    python -m backend.scraper.run --once
-    python -m backend.scraper.run --watch --interval 30
-    python -m backend.scraper.run --reset-cursor
-
-    # HTML mode — point at any SilkVault-structured forum:
-    python -m backend.scraper.run --once --html \\
-        --url <onion>.onion --proxy socks5://127.0.0.1:9051 --source silkvault
+"""Scraper CLI: pull forum posts via Tor and save them.
+Run: python -m backend.scraper.run --once | --watch | --reset-cursor  (add --html --url ... for HTML forums)
 """
 
 from __future__ import annotations
@@ -44,13 +27,12 @@ def _setup_logging(verbose: bool) -> None:
 
 
 def poll_once(store: Store, client: ForumClient, batch_limit: int = 1000) -> tuple[int, int, int]:
-    """One pass: fetch new posts since the stored cursor, insert, return counts.
-
-    Returns (fetched, inserted, duplicates).
-    """
+    """Fetch new posts since the last cursor and save; returns (fetched, inserted, duplicates)."""
+    # Only ask for posts newer than the newest one we already have
     cursor_before = store.get_cursor(source="darkbay")
     log.info("polling /api/posts since=%s", cursor_before)
 
+    # store.run() logs this run in scraper_runs
     with store.run(cursor_before) as h:
         try:
             payload = client.fetch_posts(since=cursor_before, limit=batch_limit)
@@ -59,6 +41,7 @@ def poll_once(store: Store, client: ForumClient, batch_limit: int = 1000) -> tup
             h.error = repr(e)
             raise
 
+        # Save the posts (duplicates are skipped)
         posts = payload.get("posts", [])
         h.fetched = len(posts)
 
@@ -78,19 +61,14 @@ def poll_once(store: Store, client: ForumClient, batch_limit: int = 1000) -> tup
 def poll_html_once(
     store: Store, client: HtmlForumClient, source: str
 ) -> tuple[int, int, int]:
-    """One pass of the HTML scraper: crawl the forum, insert new posts.
-
-    Mirrors poll_once but for forums with no JSON API. `source` is recorded on
-    every inserted row so the DB knows which forum the post came from.
-    Returns (fetched, inserted, duplicates).
-    """
-    # Per-source cursor: a SilkVault crawl must not be held back by DarkBay's
-    # (or any other forum's) newer timestamps. Matches jobs/runner.py.
+    """Same as poll_once but for HTML forums; returns (fetched, inserted, duplicates)."""
+    # Cursor per forum so other forums' posts don't hold it back
     cursor_before = store.get_cursor(source=source)
     log.info("HTML crawl of %s since=%s", client.host, cursor_before)
 
     with store.run(cursor_before) as h:
         try:
+            # Crawl the forum's pages
             crawl = client.crawl(since=cursor_before, source=source)
         except httpx.HTTPError as e:
             log.error("crawl failed: %s", e)
@@ -102,6 +80,7 @@ def poll_html_once(
             log.warning("crawl reported %d error(s): %s",
                         len(crawl.errors), "; ".join(crawl.errors[:3]))
 
+        # Save the posts (duplicates are skipped)
         h.fetched = len(crawl.posts)
         inserted, duplicates = store.insert_posts(crawl.posts, source=source)
         h.inserted = inserted
@@ -119,6 +98,7 @@ def poll_html_once(
 
 def run_watch(store: Store, client: ForumClient, interval: float) -> None:
     log.info("watch mode: polling every %.1fs (Ctrl-C to stop)", interval)
+    # Poll forever, waiting `interval` seconds between polls
     while True:
         try:
             poll_once(store, client)
@@ -128,6 +108,7 @@ def run_watch(store: Store, client: ForumClient, interval: float) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Command-line options
     p = argparse.ArgumentParser(prog="sentinelx-scraper")
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--once", action="store_true", help="poll once and exit (default)")
@@ -161,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
 
     store = Store(args.db) if args.db else Store()
 
+    # --reset-cursor: delete all posts and exit
     if args.reset_cursor:
         store.reset()
         log.info("cursor reset: raw_posts and scraper_runs cleared")
@@ -174,12 +156,13 @@ def main(argv: list[str] | None = None) -> int:
             read_silkvault_hostname,
         )
 
+        # Forum address: --url, or read SilkVault's .onion from its Tor folder
         url = args.url or read_silkvault_hostname()
-        # SilkVault's Tor is on :9051; nudge the default if the user left
-        # --proxy at DarkBay's :9050 and didn't pass --url explicitly.
+        # SilkVault's Tor runs on port 9051
         proxy = args.proxy
         if not args.url and proxy == "socks5://127.0.0.1:9050":
             proxy = "socks5://127.0.0.1:9051"
+        # Label saved on each post (defaults to the forum host)
         source = args.source or HtmlForumClient(url, proxy=None).host
         log.info("HTML target: %s  via %s  (source=%s)", url, proxy, source)
 
@@ -207,6 +190,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # --- JSON scraper path (default — the DarkBay forum) --- #
+    # DarkBay address: --onion, or read from its Tor folder
     onion = args.onion or read_onion_hostname()
     log.info("target: http://%s  via %s", onion, args.proxy)
 

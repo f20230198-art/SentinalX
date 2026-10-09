@@ -1,12 +1,6 @@
-/**
- * Data colours for SVG/canvas drawing, where Tailwind classes can't reach.
- * Values mirror the @theme tokens in index.css — keep the two in sync.
- *
- * Rule of the system: colour is never the only carrier of meaning. Provenance
- * also differs by fill pattern (solid / hatched / outline), IOC types also
- * by label, intents also by text.
- */
+/** Colours for SVG/canvas charts (keep in sync with index.css). */
 
+// Base colours
 export const INK = "#e6ede7";
 export const MUTED = "#9db2a6";
 export const RULE = "#2a4136";
@@ -16,8 +10,7 @@ export const INFO = "#79b0ff";
 export const WARN = "#e9b04f";
 export const OK = "#5fd39a";
 
-/** IOC families: network (blue), crypto/payment (amber), vuln (red),
- *  hashes (green), identity/web (ink). */
+/** IOC colours: network blue, crypto amber, vuln red, hashes green, identity ink. */
 export const IOC_COLOR: Record<string, string> = {
   ipv4: INFO,
   ipv6: INFO,
@@ -30,6 +23,7 @@ export const IOC_COLOR: Record<string, string> = {
   sha1: OK,
   sha256: OK,
 };
+// Look up an IOC's colour (default ink)
 export const iocColor = (t: string) => IOC_COLOR[t] ?? INK;
 
 /** Intent is a label first; colour only separates the two that need eyes. */
@@ -41,6 +35,7 @@ export const INTENT_COLOR: Record<string, string> = {
 export const intentColor = (intent: string | null | undefined) =>
   (intent && INTENT_COLOR[intent]) || MUTED;
 
+// Where a technique match came from, with its label, help text and colour
 export type Provenance = "llm_verified" | "semantic" | "llm_unverified";
 
 export const PROVENANCE: Record<

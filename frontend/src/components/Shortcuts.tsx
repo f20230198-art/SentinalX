@@ -1,14 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-/* ----------------------------------------------------------------------- *
- * Global keyboard shortcuts.
- *   g then o/p/t/i/s/d   go to a page
- *   ?                    show this sheet
- * Page-level keys (j/k/Enter, "/", Esc) are handled where they apply.
- * Ignored while typing in a field.
- * ----------------------------------------------------------------------- */
+/* Keyboard shortcuts: g + o/p/t/i/s/d = go to page, ? = help (ignored while typing) */
 
+// "g" then this key -> go to this page
 const GO: Record<string, [string, string]> = {
   o: ["/", "Overview"],
   p: ["/posts", "Posts"],
@@ -19,6 +14,7 @@ const GO: Record<string, [string, string]> = {
   s: ["/scout", "Scout"],
 };
 
+// Page-specific keys, only listed in the help sheet
 const PAGE_KEYS: [string, string][] = [
   ["/", "Search posts (Posts page)"],
   ["j / k", "Next / previous post"],
@@ -29,16 +25,21 @@ const PAGE_KEYS: [string, string][] = [
 export function Shortcuts() {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
+  // Set while waiting for the 2nd key after "g"
   const pendingG = useRef<number | null>(null);
 
+  // Listen for key presses on the whole page
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Ignore keys while typing in a field or when Ctrl/Alt/Cmd is held
       if ((e.target as HTMLElement)?.closest("input, textarea, select") || e.metaKey || e.ctrlKey || e.altKey) return;
+      // "?" opens/closes the help sheet
       if (e.key === "?") {
         setOpen((v) => !v);
         return;
       }
       if (e.key === "Escape") setOpen(false);
+      // Second key after "g": go to that page
       if (pendingG.current !== null) {
         window.clearTimeout(pendingG.current);
         pendingG.current = null;
@@ -50,6 +51,7 @@ export function Shortcuts() {
         }
         return;
       }
+      // "g" pressed: wait up to 0.9s for the second key
       if (e.key === "g") pendingG.current = window.setTimeout(() => (pendingG.current = null), 900);
     };
     window.addEventListener("keydown", onKey);
@@ -58,6 +60,7 @@ export function Shortcuts() {
 
   return (
     <>
+      {/* "?" button in the header */}
       <button
         onClick={() => setOpen(true)}
         className="hidden border border-border-soft px-2 py-1 font-mono text-xs text-text-muted hover:border-text hover:text-text lg:block"
@@ -66,6 +69,7 @@ export function Shortcuts() {
       >
         ?
       </button>
+      {/* Help sheet (click outside to close) */}
       {open && (
         <div className="fixed inset-0 z-50 grid place-items-center bg-text/30 p-4" onClick={() => setOpen(false)}>
           <div

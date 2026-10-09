@@ -5,6 +5,7 @@ import { LanguageSwitcher } from "./LanguageSwitcher";
 import { Shortcuts } from "./Shortcuts";
 import { AlertBadge } from "./AlertBadge";
 
+// Top menu links (labels come from the translation files)
 const NAV = [
   { to: "/", key: "nav.console" },
   { to: "/posts", key: "nav.feed" },
@@ -14,6 +15,7 @@ const NAV = [
   { to: "/scout", key: "nav.scout" },
 ];
 
+// Sticky top bar: logo, menu, then language / alerts / status / shortcuts
 export function Header() {
   const { t } = useTranslation();
   return (
@@ -41,6 +43,7 @@ export function Header() {
             </NavLink>
           ))}
         </nav>
+        {/* Right-side tools (hidden on small screens) */}
         <div className="hidden items-center gap-3 md:flex">
           <LanguageSwitcher />
           <AlertBadge />
@@ -52,8 +55,7 @@ export function Header() {
   );
 }
 
-/** Register section heading: heavy rule, title left, metadata right.
- *  `index` is accepted for backwards compatibility and intentionally unused. */
+/** Section heading: thick rule, title left, extra info right (`index` is unused). */
 export function SectionDivider({
   label,
   trailing,

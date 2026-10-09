@@ -1,24 +1,5 @@
-"""Investigations: saved filter views with optional cross-post LLM summaries.
-
-An investigation = (name, filters_json, optional lens, optional summary).
-The filter JSON is stored verbatim and re-evaluated on every read, so an
-investigation reflects the current corpus, not a snapshot at creation time.
-
-Filter schema (all keys optional, all combine with AND):
-    {
-      "category": "ransomware",
-      "intent": "sale",
-      "technique": "T1566",
-      "q": "credential",
-      "ioc_type": "btc",
-      "since": 1745000000.0,
-      "until": 1746000000.0,
-      "post_ids": [1, 2, 3]
-    }
-
-A rerun packs every matching post's body + IOCs + entities + technique list
-into a single prompt, asks Mistral to write a fused summary under the
-chosen lens, and writes it back to investigations.summary.
+"""Investigations: saved filters (re-evaluated live) + optional LLM summary through a lens.
+Filter keys (all optional, ANDed): category, intent, technique, q, ioc_type, since, until, post_ids
 """
 
 from __future__ import annotations
@@ -32,32 +13,30 @@ from backend.llm.client import OllamaClient
 from backend.llm.lenses import get_lens
 from backend.llm.prompts import UNTRUSTED_END, UNTRUSTED_RULE, UNTRUSTED_START, fence_untrusted
 
-# Cap on how many posts get fed into a single rerun prompt. Mistral's effective
-# context for our setup is ~8k tokens; at ~400 tokens of body+enrichment per
-# post we top out around 20 before quality degrades. The cap is per-rerun, not
-# per-investigation — bigger investigations just sample.
+# Max posts sent to the LLM per rerun (Mistral context is ~8k tokens)
 MAX_POSTS_PER_RERUN = 20
+# Each post body is cut to this length in the lens prompt
 MAX_BODY_CHARS = 1200
 
 
 def _build_where(filters: dict) -> tuple[str, list[Any], str]:
-    """Translate the filter dict to a SQL WHERE + JOIN clause.
-
-    Returns (where_sql, args, join_sql). The caller is responsible for the
-    SELECT/FROM and ordering. We always alias raw_posts as rp.
-    """
+    """Turn the filter dict into SQL (where, args, join); raw_posts is aliased rp."""
+    # Collect WHERE conditions and JOINs (with their ? values) for each filter that is set
     where: list[str] = []
     where_args: list[Any] = []
     joins: list[str] = []
     join_args: list[Any] = []
 
+    # Filter by forum category
     if filters.get("category"):
         where.append("rp.category = ?")
         where_args.append(filters["category"])
+    # Filter by LLM intent (needs the llm_analyses table)
     if filters.get("intent"):
         joins.append("LEFT JOIN llm_analyses la ON la.raw_post_id = rp.id")
         where.append("la.intent = ?")
         where_args.append(filters["intent"])
+    # Filter by MITRE technique
     if filters.get("technique"):
         joins.append(
             "JOIN post_techniques pt_f ON pt_f.raw_post_id = rp.id "
@@ -69,17 +48,20 @@ def _build_where(filters: dict) -> tuple[str, list[Any], str]:
         where.append("(rp.body LIKE ? OR rp.body_en LIKE ? OR rp.thread_title LIKE ?)")
         like = f"%{filters['q']}%"
         where_args.extend([like, like, like])
+    # Only posts that contain a certain IOC type (e.g. btc)
     if filters.get("ioc_type"):
         joins.append(
             "JOIN iocs ioc_f ON ioc_f.raw_post_id = rp.id AND ioc_f.ioc_type = ?"
         )
         join_args.append(filters["ioc_type"])
+    # Date range
     if filters.get("since") is not None:
         where.append("rp.source_created_at >= ?")
         where_args.append(float(filters["since"]))
     if filters.get("until") is not None:
         where.append("rp.source_created_at <= ?")
         where_args.append(float(filters["until"]))
+    # A fixed list of post ids
     if filters.get("post_ids"):
         ids = [int(x) for x in filters["post_ids"]]
         if not ids:
@@ -89,6 +71,7 @@ def _build_where(filters: dict) -> tuple[str, list[Any], str]:
             where.append(f"rp.id IN ({placeholders})")
             where_args.extend(ids)
 
+    # Glue everything together into SQL text
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
     join_sql = " ".join(dict.fromkeys(joins))  # dedupe while preserving order
     return where_sql, join_args + where_args, join_sql
@@ -100,13 +83,9 @@ def evaluate_filter(
     *,
     limit: int | None = None,
 ) -> list[dict]:
-    """Return the post rows matching `filters`, newest first.
-
-    Each row carries the post + analysis fields the dashboard needs in the
-    list view. The full body / IOCs / entities are not joined here — the
-    rerun helper pulls those separately for the small sampled subset.
-    """
+    """Posts matching the filters, newest first."""
     where_sql, args, join_sql = _build_where(filters or {})
+    # Always join llm_analyses so intent + summary come back too
     if "LEFT JOIN llm_analyses la" not in join_sql:
         join_sql = (join_sql + " LEFT JOIN llm_analyses la ON la.raw_post_id = rp.id").strip()
     sql = (
@@ -116,12 +95,14 @@ def evaluate_filter(
         f"FROM raw_posts rp {join_sql} {where_sql} "
         "ORDER BY rp.source_created_at DESC"
     )
+    # Optional row limit
     if limit is not None:
         sql += " LIMIT ?"
         args = args + [limit]
     return [dict(r) for r in conn.execute(sql, args).fetchall()]
 
 
+# Same filters, but only count the posts
 def count_filter(conn: sqlite3.Connection, filters: dict) -> int:
     where_sql, args, join_sql = _build_where(filters or {})
     if "LEFT JOIN llm_analyses la" not in join_sql:
@@ -134,10 +115,10 @@ def count_filter(conn: sqlite3.Connection, filters: dict) -> int:
 
 
 def _pack_post_for_lens(conn: sqlite3.Connection, post_id: int) -> str:
+    # Load the post, its LLM analysis, IOCs, entities and techniques
     """Render one post + its enrichment as a compact text block for the LLM."""
     p = conn.execute(
-        # COALESCE(body_en, body): the lens LLM reasons in English, like the
-        # per-post chain, so non-English posts are packed as their translation.
+        # Use the English translation so the LLM reads English
         "SELECT id, thread_title, category, author, "
         "  COALESCE(body_en, body) AS body, source_created_at "
         "FROM raw_posts WHERE id = ?", (post_id,)
@@ -163,9 +144,9 @@ def _pack_post_for_lens(conn: sqlite3.Connection, post_id: int) -> str:
         (post_id,)
     ).fetchall()
 
+    # Forum text is wrapped in the untrusted markers
     body = (p["body"] or "")[:MAX_BODY_CHARS]
-    # Only the forum-written fields are untrusted; the enrichment lines below
-    # come from our own pipeline and stay outside the fence.
+    # Only forum-written text is untrusted (fenced); our own enrichment stays outside
     parts = [
         f"=== POST [#{p['id']}] ===",
         UNTRUSTED_START,
@@ -174,6 +155,7 @@ def _pack_post_for_lens(conn: sqlite3.Connection, post_id: int) -> str:
         f"BODY: {fence_untrusted(body)}",
         UNTRUSTED_END,
     ]
+    # Then add what our pipeline already found
     if la:
         if la["intent"]:
             parts.append(f"INTENT: {la['intent']}")
@@ -199,11 +181,8 @@ def run_lens_summary(
     *,
     model: str = "mistral",
 ) -> dict[str, Any]:
-    """Re-evaluate the filter, pack the matched posts, run the lens prompt.
-
-    Writes summary + summary_model + summary_post_ids + last_run_at + updated_at
-    back onto the investigation row. Returns the updated row as a dict.
-    """
+    """Re-run the filter, send matched posts through the lens prompt, save the summary."""
+    # Load the investigation and its lens (it must have one)
     inv = conn.execute(
         "SELECT * FROM investigations WHERE id = ?", (investigation_id,)
     ).fetchone()
@@ -217,6 +196,7 @@ def run_lens_summary(
     lens = get_lens(inv["lens"])
     filters = json.loads(inv["filters_json"] or "{}")
 
+    # Find matching posts (capped so the prompt fits)
     rows = evaluate_filter(conn, filters, limit=MAX_POSTS_PER_RERUN)
     if not rows:
         summary = (
@@ -224,6 +204,7 @@ def run_lens_summary(
             "rerun. Loosen the filter or wait for new ingestion."
         )
         post_ids: list[int] = []
+    # Pack each post as text and ask the LLM for one combined report
     else:
         post_ids = [int(r["id"]) for r in rows]
         blocks = [_pack_post_for_lens(conn, pid) for pid in post_ids]
@@ -247,6 +228,7 @@ def run_lens_summary(
             )
         summary = gen.text.strip()
 
+    # Save the summary and which posts it was based on
     now = time.time()
     conn.execute(
         "UPDATE investigations SET summary = ?, summary_model = ?, "
@@ -262,6 +244,7 @@ def run_lens_summary(
 
 
 def _row_to_inv(row: sqlite3.Row) -> dict[str, Any]:
+    # DB row -> dict, with the JSON columns decoded
     d = dict(row)
     d["filters"] = json.loads(d.pop("filters_json") or "{}")
     d["summary_post_ids"] = json.loads(d.get("summary_post_ids") or "[]")
@@ -276,6 +259,7 @@ def create_investigation(
     filters: dict,
     lens: str | None,
 ) -> dict[str, Any]:
+    # Make sure the lens name exists, then insert
     if lens is not None:
         get_lens(lens)  # validates
     now = time.time()
@@ -300,6 +284,7 @@ def update_investigation(
     filters: dict | None = None,
     lens: str | None = None,
 ) -> dict[str, Any]:
+    # Only update the fields that were given
     sets: list[str] = []
     args: list[Any] = []
     if name is not None:
@@ -311,6 +296,7 @@ def update_investigation(
     if lens is not None:
         get_lens(lens)
         sets.append("lens = ?"); args.append(lens)
+    # Nothing to change: just return the current row
     if not sets:
         row = conn.execute(
             "SELECT * FROM investigations WHERE id = ?", (investigation_id,)
@@ -333,6 +319,7 @@ def update_investigation(
 
 
 def delete_investigation(conn: sqlite3.Connection, investigation_id: int) -> bool:
+    # Delete; True if a row was actually removed
     cur = conn.execute(
         "DELETE FROM investigations WHERE id = ?", (investigation_id,)
     )
@@ -350,14 +337,8 @@ def list_investigations(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 def aggregate_mitigations(
     conn: sqlite3.Connection, post_ids: list[int]
 ) -> list[dict[str, Any]]:
-    """Build a priority-ranked mitigation list across a set of posts.
-
-    For every MITRE mitigation reachable from any technique on any of these
-    posts, count how many distinct posts it would help defend. The result is a
-    'do this first' list — the mitigation covering the most posts ranks highest.
-
-    Pure lookup over post_techniques -> technique_mitigations; no LLM.
-    """
+    """Mitigations across these posts, ranked by how many posts each one covers."""
+    # Every (mitigation, post, technique) link for these posts
     ids = [int(p) for p in post_ids]
     if not ids:
         return []
@@ -374,6 +355,7 @@ def aggregate_mitigations(
         ids,
     ).fetchall()
 
+    # Group by mitigation, collecting which posts and techniques it covers
     by_mid: dict[str, dict[str, Any]] = {}
     for r in rows:
         mid = r["mitigation_id"]
@@ -391,6 +373,7 @@ def aggregate_mitigations(
         entry["_posts"].add(r["raw_post_id"])
         entry["_techniques"].add(r["technique_id"])
 
+    # Turn the sets into counts and sort: covers the most posts first
     total_posts = len(set(ids))
     out: list[dict[str, Any]] = []
     for e in by_mid.values():
@@ -409,6 +392,7 @@ def aggregate_mitigations(
 def get_investigation(
     conn: sqlite3.Connection, investigation_id: int, *, include_posts: bool = True
 ) -> dict[str, Any]:
+    # Load the investigation; optionally run its filter and attach the matching posts + mitigations
     row = conn.execute(
         "SELECT * FROM investigations WHERE id = ?", (investigation_id,)
     ).fetchone()

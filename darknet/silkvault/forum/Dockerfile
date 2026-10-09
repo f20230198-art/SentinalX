@@ -1,6 +1,4 @@
-# SilkVault — synthetic darknet forum #2 image.
-# Slim Python base; gunicorn serves the Flask app on :5000 inside the container.
-# A dedicated Tor container reverse-proxies SilkVault's own .onion address here.
+# SilkVault forum image: Flask app served by gunicorn on :5000 (its own Tor exposes it)
 
 FROM python:3.12-slim
 
@@ -22,6 +20,5 @@ VOLUME ["/data"]
 
 EXPOSE 5000
 
-# Seed the DB on first boot if it's missing, then hand off to gunicorn.
-# `exec` so gunicorn becomes PID 1 and signals (SIGTERM) propagate cleanly.
+# Seed the DB on first boot, then start gunicorn
 CMD ["sh", "-c", "if [ ! -f \"$VAULT_DB\" ]; then python seed_data.py --reset --count 55 --seed 73; fi && exec gunicorn -w 2 -b 0.0.0.0:5000 --access-logfile - app:app"]

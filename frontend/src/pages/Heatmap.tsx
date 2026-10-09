@@ -5,17 +5,9 @@ import { SectionDivider } from "../components/Shell";
 import { DetailPanel } from "../components/DetailPanel";
 import { ProvenanceLabel, ProvenanceLegend, QueryError } from "../components/Evidence";
 
-/* ----------------------------------------------------------------------- *
- * MITRE ATT&CK Enterprise heatmap.
- *
- * Layout: classic Navigator-style matrix — tactics across the top, the
- * techniques observed in our corpus stacked underneath each tactic column.
- * Cells shade by post_count (darker = more observed). Click a cell → fetch
- * the technique's posts and surface them via the shared DetailPanel.
- * ----------------------------------------------------------------------- */
+/* MITRE heatmap: tactics as columns, techniques shaded by post count; click to see posts */
 
-// Canonical Enterprise ATT&CK tactics, grouped into 3 kill-chain phases so
-// the matrix breathes across rows instead of cramming 14 columns into one.
+// ATT&CK tactics, grouped into 3 rows
 type Tactic = { slug: string; label: string };
 const TACTIC_ROWS: { phase: string; tactics: Tactic[] }[] = [
   {
@@ -27,8 +19,7 @@ const TACTIC_ROWS: { phase: string; tactics: Tactic[] }[] = [
       { slug: "execution", label: "Execution" },
       { slug: "persistence", label: "Persistence" },
       { slug: "privilege-escalation", label: "Priv Esc" },
-      // ATT&CK v18 split the old "Defense Evasion" tactic into Stealth and
-      // Defense Impairment; the corpus we ingest uses the new slugs.
+      // ATT&CK v18 split Defense Evasion into Stealth + Defense Impairment
       { slug: "stealth", label: "Stealth" },
       { slug: "defense-impairment", label: "Defense Impairment" },
     ],
@@ -46,8 +37,10 @@ const TACTIC_ROWS: { phase: string; tactics: Tactic[] }[] = [
     ],
   },
 ];
+// All tactics in one flat list
 const TACTICS: Tactic[] = TACTIC_ROWS.flatMap((r) => r.tactics);
 
+// Column for techniques with no known tactic
 const UNCATEGORISED = "__none__";
 
 // Cells past the midpoint of the ramp carry white text.
@@ -55,8 +48,7 @@ function onInk(count: number, max: number): boolean {
   return count > 0 && Math.log(1 + count) / Math.log(1 + max) > 0.5;
 }
 
-// Ink ramp on a log scale: a few heavily-mapped techniques shouldn't wash
-// out the long tail.
+// Cell shade on a log scale so rare techniques still show
 function shade(count: number, max: number): string {
   if (count <= 0) return "rgba(230,237,231,0.04)";
   const t = Math.min(1, Math.log(1 + count) / Math.log(1 + max));
@@ -64,21 +56,26 @@ function shade(count: number, max: number): string {
   return `rgba(230, 237, 231, ${alpha.toFixed(3)})`;
 }
 
+// Techniques page (MITRE heatmap)
 export function Heatmap() {
+  // Post open in the side panel, and technique open in the technique panel
   const [selectedPost, setSelectedPost] = useState<number | null>(null);
   const [selectedTech, setSelectedTech] = useState<string | null>(null);
 
+  // Every technique that appears in at least one post
   const list = useQuery({
     queryKey: ["techniques", "only_seen"],
     queryFn: () => api.techniques({ only_seen: true, limit: 1000 }),
   });
 
+  // Details of the clicked technique (only loaded after a click)
   const detail = useQuery({
     queryKey: ["technique", selectedTech],
     queryFn: () => api.technique(selectedTech!),
     enabled: selectedTech !== null,
   });
 
+  // Put each technique under every tactic it belongs to, busiest first
   const { columns, max, total } = useMemo(() => {
     const items = list.data?.items ?? [];
     const cols: Record<string, TechniqueListItem[]> = {};
@@ -100,6 +97,7 @@ export function Heatmap() {
     return { columns: cols, max: mx, total: items.length };
   }, [list.data]);
 
+  // Only add an "Other" row if some technique has no tactic
   const hasUncat = columns[UNCATEGORISED]?.length > 0;
   const rows = hasUncat
     ? [
@@ -128,6 +126,7 @@ export function Heatmap() {
         <QueryError what="techniques" error={list.error} onRetry={() => list.refetch()} />
       )}
 
+      {/* One grid per row of tactics */}
       <div className="space-y-6">
         {rows.map((row) => (
           <div key={row.phase}>
@@ -140,6 +139,7 @@ export function Heatmap() {
                   gridTemplateColumns: `repeat(${row.tactics.length}, minmax(150px, 1fr))`,
                 }}
               >
+                {/* Header cell per tactic, with how many techniques it has */}
                 {row.tactics.map((t) => (
                   <div
                     key={t.slug}
@@ -152,6 +152,7 @@ export function Heatmap() {
                   </div>
                 ))}
 
+                {/* One column of technique cells per tactic */}
                 {row.tactics.map((t) => (
                   <div
                     key={`col-${t.slug}`}
@@ -188,6 +189,7 @@ export function Heatmap() {
         ))}
       </div>
 
+      {/* Colour scale legend */}
       <div className="mt-3 flex flex-wrap items-center gap-4 text-xs text-text-muted">
         <span>Posts per technique</span>
         <div className="flex items-center gap-px">
@@ -203,6 +205,7 @@ export function Heatmap() {
         <span>fewer to more (log scale)</span>
       </div>
 
+      {/* Technique details panel, and the post panel on top of it */}
       <TechniquePanel
         techniqueId={selectedTech}
         loading={detail.isLoading}
@@ -218,6 +221,7 @@ export function Heatmap() {
   );
 }
 
+// Right-side panel: technique name, tactics, description, and every post mapped to it
 function TechniquePanel({
   techniqueId,
   loading,
@@ -276,6 +280,7 @@ function TechniquePanel({
               )}
             </header>
 
+            {/* MITRE's description */}
             {detail.description && (
               <section>
                 <SectionLabel>Description</SectionLabel>
@@ -285,6 +290,7 @@ function TechniquePanel({
               </section>
             )}
 
+            {/* Posts mapped to this technique; click one to open it */}
             <section>
               <SectionLabel>Evidence: {detail.posts.length} mappings</SectionLabel>
               <div className="mb-3"><ProvenanceLegend compact /></div>

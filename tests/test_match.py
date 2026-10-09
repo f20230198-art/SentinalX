@@ -37,6 +37,7 @@ def test_verify_splits_real_and_hallucinated_codes():
     assert out[0].evidence == "phish kit"
 
 
+# Helper: scale a vector to length 1
 def _unit(v):
     v = np.asarray(v, dtype=np.float32)
     return v / np.linalg.norm(v)

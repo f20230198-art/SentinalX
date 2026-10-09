@@ -1,29 +1,4 @@
-"""Generic HTML scraper for darknet forums that have no JSON API.
-
-DarkBay (the original synthetic forum) exposes a convenient /api/posts JSON
-endpoint. Real darknet forums do not — and neither does SilkVault, our second
-synthetic forum, on purpose. This module is the scraper path for those: it
-fetches HTML pages over Tor and parses them with BeautifulSoup into the same
-post-dict shape the JSON scraper produces, so backend.db.store.Store can ingest
-either source unchanged.
-
-It targets the SilkVault page structure:
-    index / board page  -> <a class="listing-card" data-listing-id="..." href="/listing/N">
-    listing page        -> <h1> title, vendor in .page-sub,
-                            <div class="vault-message" data-message-id="N"
-                                 data-epoch="...">
-                              <span class="message-author">  <div class="message-body">
-
-Design notes:
-  * Parsing leans on the data-* attributes first (data-listing-id,
-    data-message-id, data-epoch) and falls back to class names / text. This is
-    a real HTML parser, not a regex — it tolerates whitespace and attribute
-    reordering the way a parser of an unfamiliar forum must.
-  * Each message becomes one post. source_thread_id = listing id,
-    source_post_id = message id, both taken straight from the forum's own ids.
-  * The crawl is bounded: a page cap and a per-request timeout keep a
-    misbehaving or huge forum from hanging the scraper.
-"""
+"""HTML scraper for forums with no API (SilkVault layout), parsed with BeautifulSoup over Tor."""
 
 from __future__ import annotations
 
@@ -47,23 +22,14 @@ DEFAULT_SOCKS_PROXY = "socks5://127.0.0.1:9051"
 # Safety caps so a hostile or huge forum can't run the scraper forever.
 DEFAULT_MAX_LISTINGS = 500
 
-# Post identity is UNIQUE(source, source_post_id), so two forums can both have
-# a post #30 without colliding. The per-forum id offset below predates that
-# composite key; it is kept only so rows already stored for HTML forums keep
-# the same source_post_id (re-crawls still dedupe against them). It is no
-# longer needed for correctness — even if two labels hash to the same block,
-# their `source` differs and the composite key keeps them apart.
+# Legacy per-forum id offset; kept so existing rows keep the same ids
 ID_BLOCK_SIZE = 1_000_000_000
 
 
 def _source_id_offset(source: str) -> int:
-    """Deterministic per-forum offset for source_post_id / source_thread_id.
-
-    Same `source` label always yields the same offset, so re-crawling a forum
-    keeps its rows stable (the UNIQUE dedup still works on re-runs). Different
-    forums get different blocks, so their ids never collide.
-    """
+    """Stable id offset for a forum label."""
     # Stable hash (Python's hash() is salted per-process; sum of bytes is not).
+    # Turn the forum name into a fixed number 0-999
     h = sum(source.encode("utf-8")) % 1000
     # +1 so DarkBay's un-offset block [0, 1e9) is never reused by an HTML forum.
     return (h + 1) * ID_BLOCK_SIZE
@@ -89,6 +55,7 @@ def read_silkvault_hostname(path: Path = SILKVAULT_HOSTNAME_FILE) -> str:
     return addr
 
 
+# Results of one crawl: posts found, pages visited, errors
 @dataclass
 class HtmlScrapeResult:
     """What one full HTML crawl produced."""
@@ -99,18 +66,15 @@ class HtmlScrapeResult:
 
 
 def _epoch_from_message(msg: Any) -> float | None:
-    """Pull a Unix epoch out of a vault-message node.
-
-    Prefers the explicit data-epoch attribute; falls back to parsing the ISO
-    string in <time datetime="...">. Returns None if neither is usable — the
-    caller drops messages with no timestamp (the cursor needs one).
-    """
+    """Get the message timestamp (data-epoch or <time>); None if missing."""
+    # Prefer the data-epoch attribute
     raw = msg.get("data-epoch")
     if raw:
         try:
             return float(raw)
         except (TypeError, ValueError):
             pass
+    # Otherwise read the <time datetime="..."> tag
     time_tag = msg.find("time")
     if time_tag and time_tag.get("datetime"):
         iso = time_tag["datetime"].strip()
@@ -122,6 +86,7 @@ def _epoch_from_message(msg: Any) -> float | None:
 
 
 def _int_attr(node: Any, *names: str) -> int | None:
+    # Try each attribute name and return the first one that is a number
     """First parseable integer among the named attributes of `node`."""
     for n in names:
         v = node.get(n)
@@ -150,8 +115,7 @@ class HtmlForumClient:
         self.base_url = base_url.rstrip("/")
         self.host = urlparse(self.base_url).netloc or self.base_url
         self.max_listings = max_listings
-        # proxy=None lets the caller scrape a plain-HTTP forum without Tor
-        # (used by tests); .onion targets need the SOCKS5 proxy.
+        # proxy=None = no Tor (used in tests)
         self._client = httpx.Client(
             proxy=proxy, timeout=timeout, follow_redirects=True
         )
@@ -167,6 +131,7 @@ class HtmlForumClient:
 
     # --- fetching --------------------------------------------------------- #
 
+    # Download one page and return its HTML
     def _get(self, path_or_url: str) -> str:
         url = urljoin(self.base_url + "/", path_or_url.lstrip("/"))
         r = self._client.get(url)
@@ -177,6 +142,7 @@ class HtmlForumClient:
 
     def _listing_urls(self, index_html: str) -> list[str]:
         """Extract distinct /listing/<id> links from an index or board page."""
+        # Normal case: links on listing cards
         soup = BeautifulSoup(index_html, "html.parser")
         urls: list[str] = []
         seen: set[str] = set()
@@ -185,8 +151,7 @@ class HtmlForumClient:
             if href and href not in seen:
                 seen.add(href)
                 urls.append(href)
-        # Fallback: any anchor pointing at /listing/N, in case the card class
-        # name differs on a forum that is SilkVault-like but not identical.
+        # Fallback: any link to /listing/N
         if not urls:
             for a in soup.find_all("a", href=re.compile(r"/listing/\d+")):
                 href = a["href"].strip()
@@ -199,6 +164,7 @@ class HtmlForumClient:
         """Turn one listing page into a list of post dicts (one per message)."""
         soup = BeautifulSoup(listing_html, "html.parser")
 
+        # Title from the <h1>
         h1 = soup.find("h1")
         title = h1.get_text(strip=True) if h1 else "(untitled listing)"
 
@@ -214,6 +180,7 @@ class HtmlForumClient:
         m = re.search(r"/listing/(\d+)", listing_url)
         listing_id = int(m.group(1)) if m else 0
 
+        # One post per message: id, time, author, body (skip incomplete ones)
         posts: list[dict] = []
         for msg in soup.select("div.vault-message"):
             msg_id = _int_attr(msg, "data-message-id")
@@ -242,19 +209,12 @@ class HtmlForumClient:
     # --- public crawl ----------------------------------------------------- #
 
     def crawl(self, since: float = 0.0, source: str | None = None) -> HtmlScrapeResult:
-        """Crawl the whole forum: index -> every listing -> every message.
-
-        `since` filters out messages at or before that epoch, matching the
-        JSON scraper's incremental-cursor behaviour. The forum has no
-        server-side `since`, so filtering happens client-side after parsing.
-
-        `source` (default: the forum host) keys a per-forum id offset applied
-        to every post's id / thread_id, so SilkVault's message #30 cannot
-        collide with DarkBay's post #30 in the globally-UNIQUE source_post_id.
-        """
+        """Crawl index -> listings -> messages, keeping only messages newer than `since`."""
+        # Each forum gets its own id range
         result = HtmlScrapeResult()
         offset = _source_id_offset(source or self.host)
 
+        # Step 1: load the front page
         try:
             index_html = self._get("/")
             result.pages_fetched += 1
@@ -262,6 +222,7 @@ class HtmlForumClient:
             result.errors.append(f"index fetch failed: {e!r}")
             return result
 
+        # Step 2: find all listing links (capped)
         listing_urls = self._listing_urls(index_html)
         if len(listing_urls) > self.max_listings:
             log.warning("forum has %d listings, capping at %d",
@@ -269,6 +230,7 @@ class HtmlForumClient:
             listing_urls = listing_urls[: self.max_listings]
         result.listings_seen = len(listing_urls)
 
+        # Step 3: open each listing and collect messages newer than `since`
         for url in listing_urls:
             try:
                 html = self._get(url)
@@ -286,6 +248,7 @@ class HtmlForumClient:
             except Exception as e:  # noqa: BLE001 — one bad page must not kill the crawl
                 result.errors.append(f"{url} parse failed: {e!r}")
 
+        # Oldest first
         result.posts.sort(key=lambda p: p["created_at"])
         log.info("crawl done: %d listings, %d pages, %d new posts, %d errors",
                  result.listings_seen, result.pages_fetched,

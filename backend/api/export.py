@@ -1,13 +1,4 @@
-"""PDF export for investigations.
-
-Renders an investigation as a single styled PDF: cover page with metadata and
-the lens summary (with [#NNN] citations turned into footnote-style references),
-a MITRE coverage chart summarising the matched post set, and one appendix page
-per cited post containing the full body, IOCs, entities, and technique map.
-
-Implementation: HTML + CSS rendered via WeasyPrint. We build the HTML in
-Python so we don't need a template engine — the structure is fixed.
-"""
+"""Export an investigation as a PDF report (cover, summary, MITRE chart, per-post appendix)."""
 
 from __future__ import annotations
 
@@ -20,19 +11,23 @@ from typing import Any
 
 from backend.api import investigations as inv
 
+# Finds citations like [#42] in the summary
 CITATION_RE = re.compile(r"\[#(\d+)\]")
 
 
+# Make text safe to put inside HTML
 def _esc(s: Any) -> str:
     return html.escape(str(s if s is not None else ""), quote=True)
 
 
+# Unix time -> "2026-01-31 14:05 UTC"
 def _fmt_ts(ts: float | int | None) -> str:
     if not ts:
         return "—"
     return datetime.fromtimestamp(float(ts), tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
+# One post with everything we know about it: analysis, IOCs, entities, techniques
 def _fetch_full_post(conn: sqlite3.Connection, post_id: int) -> dict[str, Any] | None:
     row = conn.execute(
         "SELECT rp.id, rp.thread_title, rp.category, rp.author, rp.body, "
@@ -73,14 +68,11 @@ def _fetch_full_post(conn: sqlite3.Connection, post_id: int) -> dict[str, Any] |
 
 
 def _summary_with_footnotes(summary: str, post_ids: list[int]) -> tuple[str, list[int]]:
-    """Replace [#NNN] in the summary with a numbered footnote anchor.
-
-    Returns (html_summary, ordered_unique_ids) where the footnote numbers map
-    to the order of first appearance and align with the appendix sections.
-    """
+    """Turn [#NNN] citations into numbered footnotes; returns (html, cited ids in order)."""
     seen: dict[int, int] = {}
     order: list[int] = []
 
+    # Replace each [#id] with a footnote number (first seen = 1, next = 2, ...)
     def repl(m: re.Match) -> str:
         pid = int(m.group(1))
         if pid not in seen:
@@ -93,8 +85,7 @@ def _summary_with_footnotes(summary: str, post_ids: list[int]) -> tuple[str, lis
 
     html_body = CITATION_RE.sub(repl, _esc(summary))
     html_body = html_body.replace("\n", "<br/>")
-    # Ensure every cited post is in the appendix even if [#NNN] was missing
-    # for some matched posts (they still belong to the investigation).
+    # Add matched posts that weren't cited so they still appear in the appendix
     for pid in post_ids:
         if pid not in seen:
             order.append(pid)
@@ -102,6 +93,7 @@ def _summary_with_footnotes(summary: str, post_ids: list[int]) -> tuple[str, lis
     return html_body, order
 
 
+# Count how many cited posts use each technique
 def _build_mitre_chart_html(posts: list[dict[str, Any]]) -> str:
     counts: dict[str, dict[str, Any]] = {}
     for p in posts:
@@ -113,6 +105,7 @@ def _build_mitre_chart_html(posts: list[dict[str, Any]]) -> str:
                 d["name"] = t["name"]
     if not counts:
         return '<p class="muted">No MITRE techniques mapped to the cited posts.</p>'
+    # Draw a table with a bar per technique, most common first
     rows = sorted(counts.items(), key=lambda kv: (-kv[1]["n"], kv[0]))
     top = max(d["n"] for _, d in rows)
     parts = ['<table class="mitre">']
@@ -135,12 +128,12 @@ def _build_mitre_chart_html(posts: list[dict[str, Any]]) -> str:
 def _build_mitigations_html(
     conn: sqlite3.Connection, post_ids: list[int]
 ) -> str:
-    """Render the 'Recommended Actions' table: MITRE mitigations for the cited
-    posts, ranked by how many posts each one would help defend."""
+    """'Recommended Actions' table: mitigations ranked by how many posts they help."""
     mitigations = inv.aggregate_mitigations(conn, post_ids)
     if not mitigations:
         return ('<p class="muted">No MITRE mitigations are published for the '
                 "techniques mapped to the cited posts.</p>")
+    # Same kind of table, but for mitigations
     top = max(m["posts_covered"] for m in mitigations) or 1
     parts = ['<table class="mitre">']
     parts.append(
@@ -159,12 +152,14 @@ def _build_mitigations_html(
     return "".join(parts)
 
 
+# One appendix page per post: details, body, IOCs, entities, techniques
 def _build_post_appendix_html(n: int, p: dict[str, Any]) -> str:
     body_html = _esc(p.get("body") or "").replace("\n", "<br/>")
     iocs = p.get("iocs") or []
     ents = p.get("entities") or []
     techs = p.get("techniques") or []
 
+    # Each list becomes HTML, or "None." if empty
     iocs_html = (
         "<ul class='kv'>"
         + "".join(
@@ -196,6 +191,7 @@ def _build_post_appendix_html(n: int, p: dict[str, Any]) -> str:
         + "</ul>"
     ) if techs else "<p class='muted'>None.</p>"
 
+    # Put the page together
     return f"""
     <section class="appendix" id="post-{p['id']}">
       <h2>[{n}] Post #{p['id']} — {_esc(p.get('thread_title') or '')}</h2>
@@ -215,6 +211,7 @@ def _build_post_appendix_html(n: int, p: dict[str, Any]) -> str:
     """
 
 
+# Styling for the PDF pages
 _PDF_CSS = """
 @page { size: A4; margin: 18mm 16mm 18mm 16mm; }
 @page { @bottom-right { content: "SentinelX I  ·  page " counter(page) " / " counter(pages); font-family: 'Inter', sans-serif; font-size: 9pt; color: #6b6388; } }
@@ -263,14 +260,15 @@ def render_investigation_pdf(
     conn: sqlite3.Connection, investigation_id: int
 ) -> tuple[bytes, str]:
     """Render the investigation to a PDF. Returns (bytes, suggested_filename)."""
+    # Load the investigation (without its post list)
     investigation = inv.get_investigation(conn, investigation_id, include_posts=False)
 
     summary_text = (investigation.get("summary") or "").strip()
     summary_post_ids = investigation.get("summary_post_ids") or []
 
+    # Use the lens summary if there is one
     if not summary_text:
-        # Allow exporting even if the lens has not been run yet — produce a
-        # filter-only report. The matched-post set is then used directly.
+        # Lens not run yet: export a filter-only report
         matched = inv.evaluate_filter(conn, investigation["filters"], limit=50)
         summary_post_ids = [int(r["id"]) for r in matched]
         summary_html = '<p class="muted">No lens summary has been generated yet. Rerun the investigation to populate this section.</p>'
@@ -278,6 +276,7 @@ def render_investigation_pdf(
     else:
         summary_html, ordered_ids = _summary_with_footnotes(summary_text, summary_post_ids)
 
+    # Load full details for each post in the report
     # Pull full post records for the appendix (and for the chart).
     full_posts: list[dict[str, Any]] = []
     for pid in ordered_ids:
@@ -285,6 +284,7 @@ def render_investigation_pdf(
         if full:
             full_posts.append(full)
 
+    # Build the chart, mitigations table and appendix pages
     chart_html = _build_mitre_chart_html(full_posts)
     mitigations_html = _build_mitigations_html(conn, [p["id"] for p in full_posts])
 
@@ -296,6 +296,7 @@ def render_investigation_pdf(
 
     generated_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
+    # Build the whole report as one HTML page
     html_doc = f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>{_esc(investigation['name'])}</title>
 <style>{_PDF_CSS}</style></head><body>
@@ -334,6 +335,7 @@ def render_investigation_pdf(
     # Import lazily so missing GTK runtime doesn't break the rest of the API.
     from weasyprint import HTML  # type: ignore
 
+    # Turn the HTML into PDF bytes and pick a safe file name
     pdf_bytes = HTML(string=html_doc).write_pdf()
     safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "_", investigation["name"]).strip("_") or "investigation"
     filename = f"sentinelx_{investigation['id']}_{safe_name}.pdf"

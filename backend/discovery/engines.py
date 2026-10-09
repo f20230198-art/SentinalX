@@ -1,22 +1,4 @@
-"""Search engines for discovery.
-
-Two kinds, one interface (`search(query, limit) -> list[Result]`):
-
-* LocalIndexEngine — full-text search (SQLite FTS5) over everything SentinelX
-  has already collected. This is exactly what a dark-web search engine like
-  Ahmia is: an index of crawled pages. It needs no network, so a demo never
-  fails, and it answers "have we already seen this?" first.
-
-* OnionSearchEngine — a real dark-web search engine queried over Tor (SOCKS5).
-  Results pages differ per engine, so parsing is deliberately generic: every
-  link that points at a .onion address (directly or through a redirect
-  parameter) is a candidate, titled by its anchor text. Engines are config,
-  not code: add one by appending to ENGINES.
-
-Safety posture: read-only GETs, no forms submitted, no logins, nothing
-downloaded or executed; results are only fetched when an analyst sends them
-to the pipeline.
-"""
+"""Search engines for Discover: local DB index (FTS5) + real dark-web engines over Tor (read-only)."""
 
 from __future__ import annotations
 
@@ -29,11 +11,13 @@ from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
+# Matches a v3 .onion address (56 characters)
 ONION_RE = re.compile(r"\b([a-z2-7]{56})\.onion\b", re.IGNORECASE)
 TOR_PROXY = os.environ.get("SENTINELX_TOR_PROXY", "socks5://127.0.0.1:9050")
 TIMEOUT = httpx.Timeout(connect=30.0, read=60.0, write=30.0, pool=60.0)
 
 
+# One search result (same shape for every engine)
 @dataclass
 class Result:
     engine: str
@@ -53,15 +37,12 @@ class Result:
 # --------------------------------------------------------------------------- #
 
 def _fts_query(q: str) -> str:
-    """Turn free text into a safe FTS5 query: quoted terms, OR'd, prefix-matched.
-
-    Quoting every term neutralises FTS operators in user input (AND, NEAR,
-    column filters, unbalanced quotes), so arbitrary text can't break the query.
-    """
+    """Make user text a safe FTS5 query (quoted terms, OR'd, prefix match)."""
     terms = [t for t in re.findall(r"[\w$.@:-]+", q.lower()) if len(t) > 1]
     return " OR ".join(f'"{t.replace(chr(34), "")}"*' for t in terms[:12])
 
 
+# Searches posts we have already collected (no network needed)
 class LocalIndexEngine:
     name = "local"
     label = "SentinelX index"
@@ -71,9 +52,11 @@ class LocalIndexEngine:
         self.conn = conn
 
     def search(self, query: str, limit: int = 20) -> list[Result]:
+        # Turn the query into FTS syntax; nothing usable -> no results
         fq = _fts_query(query)
         if not fq:
             return []
+        # Full-text search; snippet() gives a text preview with the match marked «like this»
         rows = self.conn.execute(
             """
             SELECT rp.id, rp.thread_title, rp.source, rp.category,
@@ -87,6 +70,7 @@ class LocalIndexEngine:
             """,
             (fq, limit),
         ).fetchall()
+        # Turn each row into a Result
         out = []
         for r in rows:
             onion = r["source"] if str(r["source"]).endswith(".onion") else None
@@ -106,6 +90,7 @@ class LocalIndexEngine:
 # Real engines over Tor
 # --------------------------------------------------------------------------- #
 
+# Config for one dark-web search engine
 @dataclass(frozen=True)
 class EngineSpec:
     name: str
@@ -113,8 +98,7 @@ class EngineSpec:
     url_template: str   # {q} is replaced with the URL-encoded query
 
 
-# Ahmia's onion service (also reachable at ahmia.fi). Add more engines here;
-# parsing is generic so most result pages work without new code.
+# Dark-web engines to query; add more here (result parsing is generic)
 ENGINES: list[EngineSpec] = [
     EngineSpec(
         "ahmia",
@@ -126,6 +110,7 @@ ENGINES: list[EngineSpec] = [
 
 def _onion_target(href: str) -> str | None:
     """The .onion URL a result link points to, unwrapping redirect params."""
+    # Direct .onion link?
     if not href:
         return None
     if ONION_RE.search(urlparse(href).netloc or ""):
@@ -148,6 +133,7 @@ def parse_results(html: str, engine: str, own_host: str = "") -> list[Result]:
         target = _onion_target(a["href"])
         if not target:
             continue
+        # Skip links back to the engine itself and duplicates
         host = urlparse(target).netloc.lower()
         if host == own_host or target in seen:
             continue
@@ -161,13 +147,7 @@ def parse_results(html: str, engine: str, own_host: str = "") -> list[Result]:
 
 
 def _form_token(c: httpx.Client, search_url: str) -> str:
-    """Anti-bot token some engines require, as an extra '&name=value'.
-
-    Ahmia's home page carries a hidden <input> in its search form whose
-    name/value rotate; a search without it is redirected back to the home
-    page with no results. Do what a browser does: load the home page, copy
-    the hidden fields of the search form. Engines without one get ''.
-    """
+    """Fetch the hidden anti-bot token some engines (Ahmia) need on the search URL."""
     parts = urlparse(search_url)
     try:
         home = c.get(f"{parts.scheme}://{parts.netloc}/")
@@ -176,6 +156,7 @@ def _form_token(c: httpx.Client, search_url: str) -> str:
         return ""
     if form is None:
         return ""
+    # Copy every hidden <input> from the engine's search form
     fields = [
         (i.get("name"), i.get("value", ""))
         for i in form.find_all("input", type="hidden")
@@ -184,6 +165,7 @@ def _form_token(c: httpx.Client, search_url: str) -> str:
     return "".join(f"&{quote_plus(n)}={quote_plus(v)}" for n, v in fields)
 
 
+# Searches a real dark-web engine through Tor
 class OnionSearchEngine:
     needs_tor = True
 
@@ -194,11 +176,13 @@ class OnionSearchEngine:
         self.proxy = proxy
 
     def search(self, query: str, limit: int = 20) -> list[Result]:
+        # Build the search URL, add the anti-bot token, fetch results over Tor
         url = self.spec.url_template.format(q=quote_plus(query))
         with httpx.Client(proxy=self.proxy, timeout=TIMEOUT, follow_redirects=True,
                           headers={"User-Agent": "Mozilla/5.0"}) as c:
             url += _form_token(c, url)
             r = c.get(url)
             r.raise_for_status()
+        # Parse every .onion link on the results page
         own = urlparse(url).netloc.lower()
         return parse_results(r.text, self.name, own_host=own)[:limit]

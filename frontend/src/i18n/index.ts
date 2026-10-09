@@ -1,20 +1,4 @@
-/**
- * i18n bootstrap for the SentinelX console.
- *
- * The backend is multilingual — it detects + translates scraped darknet posts.
- * This makes the *interface* multilingual too, so an analyst can drive the
- * console in their own language.
- *
- * Scope note: we translate UI chrome — nav, section labels, buttons, status
- * words, helper prose. We deliberately do NOT translate:
- *   - the terminal-aesthetic index tags ("[01]", "[02] FEED" …) — decorative,
- *     and part of the product's identity;
- *   - data from the API (post bodies, MITRE technique names, IOC values) —
- *     those are content, handled separately (post bodies via body_en).
- *
- * Language is persisted to localStorage and also honours the browser's
- * Accept-Language on first visit, via i18next-browser-languagedetector.
- */
+/** UI translations setup (en/ru/es); only interface text is translated, not data. */
 
 import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
@@ -33,6 +17,7 @@ export const SUPPORTED_LANGUAGES = [
 
 export type LanguageCode = (typeof SUPPORTED_LANGUAGES)[number]["code"];
 
+// Set up i18next: load the 3 translation files, detect the user's language, remember the choice
 void i18n
   .use(LanguageDetector)
   .use(initReactI18next)
@@ -42,11 +27,12 @@ void i18n
       ru: { translation: ru },
       es: { translation: es },
     },
+    // Missing text falls back to English
     fallbackLng: "en",
     supportedLngs: SUPPORTED_LANGUAGES.map((l) => l.code),
-    // Missing keys fall through to the English string rather than showing the
-    // raw key — a half-translated locale still reads cleanly.
+    // React already escapes text, so i18next doesn't need to
     interpolation: { escapeValue: false },
+    // Look in localStorage first, then the browser language; save the choice in localStorage
     detection: {
       order: ["localStorage", "navigator"],
       lookupLocalStorage: "sentinelx.lang",

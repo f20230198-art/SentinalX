@@ -1,7 +1,4 @@
--- Synthetic darknet forum schema.
--- Two tables only — threads and the posts that hang off them.
--- Timestamps are stored as Unix epoch floats so the JSON API can do simple
--- numeric `since` filtering without date parsing.
+-- DarkBay forum: threads and their posts (timestamps are Unix epoch)
 
 CREATE TABLE IF NOT EXISTS threads (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,

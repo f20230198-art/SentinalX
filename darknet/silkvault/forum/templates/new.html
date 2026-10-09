@@ -49,9 +49,7 @@
 </form>
 
 <script>
-/* Demo helper for this synthetic forum: composes a random listing from
- * parts, so every click differs (target, sector, IP, CVE, price, wallet)
- * and each one carries indicators for SentinelX to extract. */
+/* Demo button: fill the form with a random IOC-rich listing */
 (function () {
   var pick = function (a) { return a[Math.floor(Math.random() * a.length)]; };
   var n = function (lo, hi) { return lo + Math.floor(Math.random() * (hi - lo + 1)); };

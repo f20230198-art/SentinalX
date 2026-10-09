@@ -17,23 +17,15 @@ import { DetailPanel } from "../components/DetailPanel";
 import { QueryError } from "../components/Evidence";
 import { iocColor as colorFor, INK, PAPER } from "../lib/palette";
 
-/* ----------------------------------------------------------------------- *
- * IOC pivot graph.
- *
- * Route: /iocs/:value (URL-encoded). Shows the chosen IOC as a central node
- * with one satellite per post that mentions it. Edges link the central IOC
- * to its posts; co-occurring IOCs across those posts are listed below as
- * clickable pivots so the analyst can chain through the corpus.
- *
- * d3-force runs on the client only — we never persist positions. The
- * simulation is small (≤30 posts), so a couple hundred ticks settles fast.
- * ----------------------------------------------------------------------- */
+/* IOC pivot (/iocs/:value): the IOC in the middle, posts around it, related IOCs below */
 
+// Max posts shown, and the graph size
 const MAX_POSTS = 30;
 const VIEW_W = 1100;
 const VIEW_H = 540;
 
 
+// One dot: the IOC itself or a post
 interface PivotNode extends SimulationNodeDatum {
   id: string;
   kind: "ioc" | "post";
@@ -42,7 +34,9 @@ interface PivotNode extends SimulationNodeDatum {
   iocType?: string;
 }
 
+// IOC pivot page
 export function IocPivot() {
+  // The IOC value from the URL, and the post open in the side panel
   const { value: rawValue } = useParams<{ value: string }>();
   const value = rawValue ? decodeURIComponent(rawValue) : "";
   const [selectedPost, setSelectedPost] = useState<number | null>(null);
@@ -54,13 +48,13 @@ export function IocPivot() {
     enabled: value.length > 0,
   });
 
+  // Keep only exact matches
   const exact = useMemo(
     () => list.data?.items.filter((i) => i.value === value) ?? [],
     [list.data, value],
   );
 
-  // Aggregate post_ids across (potentially) multiple ioc_type rows for the
-  // same value (e.g. someone tags the same string as both domain + url).
+  // Merge post ids if the same value is stored under several IOC types
   const { postIds, types } = useMemo(() => {
     const ids = new Set<number>();
     const ts = new Set<string>();
@@ -76,6 +70,7 @@ export function IocPivot() {
     };
   }, [exact]);
 
+  // Load each post's details in parallel
   const postsQ = useQueries({
     queries: postIds.map((id) => ({
       queryKey: ["post", id],
@@ -91,6 +86,7 @@ export function IocPivot() {
     [postsQ],
   );
 
+  // Other IOCs in these posts, most common first (top 24)
   const coIocs = useMemo(() => {
     const m = new Map<string, { type: string; value: string; n: number }>();
     for (const p of posts) {
@@ -105,6 +101,7 @@ export function IocPivot() {
     return [...m.values()].sort((a, b) => b.n - a.n).slice(0, 24);
   }, [posts, value]);
 
+  // No IOC in the URL
   if (!value) {
     return (
       <div className="mx-auto max-w-[1440px] px-4 pt-12 sm:px-8">
@@ -138,6 +135,7 @@ export function IocPivot() {
       </div>
       {list.isError && <QueryError what="matching posts" error={list.error} onRetry={() => list.refetch()} />}
 
+      {/* Loading, nothing found, or the graph */}
       {list.isLoading ? (
         <p className="text-sm text-text-muted">Searching the corpus…</p>
       ) : exact.length === 0 ? (
@@ -154,6 +152,7 @@ export function IocPivot() {
         />
       )}
 
+      {/* Related IOCs: click one to pivot to it */}
       {coIocs.length > 0 && (
         <section className="mt-8">
           <h3 className="m-0 mb-3 border-t-2 border-rule pt-2 text-sm font-bold">
@@ -189,6 +188,7 @@ export function IocPivot() {
   );
 }
 
+// Star-shaped graph: the IOC fixed in the middle, a dot for each post around it
 function PivotGraph({
   value,
   types,
@@ -208,8 +208,7 @@ function PivotGraph({
     null,
   );
 
-  // Build node + link arrays. Posts that haven't loaded yet still appear as
-  // placeholder nodes so the graph stays stable as detail queries resolve.
+  // Build graph nodes/links (unloaded posts show as placeholders)
   const { nodes, links } = useMemo(() => {
     const ns: PivotNode[] = [
       { id: "ioc:center", kind: "ioc", label: value, x: VIEW_W / 2, y: VIEW_H / 2, fx: VIEW_W / 2, fy: VIEW_H / 2 },
@@ -231,6 +230,7 @@ function PivotGraph({
     return { nodes: ns, links: ls };
   }, [value, posts, allPostIds]);
 
+  // Physics: posts push apart, links keep them a set distance from the centre
   useEffect(() => {
     const sim = forceSimulation<PivotNode>(nodes)
       .force("center", forceCenter(VIEW_W / 2, VIEW_H / 2))
@@ -346,6 +346,7 @@ function PivotGraph({
   );
 }
 
+// Shorten long labels with "…"
 function truncate(s: string, n: number) {
   return s.length > n ? s.slice(0, n - 1) + "…" : s;
 }

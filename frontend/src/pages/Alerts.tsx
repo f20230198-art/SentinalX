@@ -6,33 +6,32 @@ import { DetailPanel } from "../components/DetailPanel";
 import { QueryError } from "../components/Evidence";
 import { intentColor } from "../lib/palette";
 
-/* ----------------------------------------------------------------------- *
- * Alerts — the "tell me when it matters to me" view.
- *
- * Left: watchlists (saved terms: a company, its domains, a product, a
- * wallet). Right: every post that mentions a watched term, unseen first.
- * New posts from any scrape or Scout run are matched automatically.
- * ----------------------------------------------------------------------- */
+/* Alerts page: watchlists on the left, posts that mention watched terms on the right */
 
+// Alerts page
 export function Alerts() {
   const qc = useQueryClient();
+  // Watchlist filter (null = all), open post, and the new-watchlist form fields
   const [filterId, setFilterId] = useState<number | null>(null);
   const [openPost, setOpenPost] = useState<number | null>(null);
   const [name, setName] = useState("");
   const [terms, setTerms] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
 
+  // Load watchlists, and alerts every 20s
   const lists = useQuery({ queryKey: ["watchlists"], queryFn: api.watchlists });
   const alerts = useQuery({
     queryKey: ["alerts", filterId],
     queryFn: () => api.alerts(filterId ?? undefined),
     refetchInterval: 20_000,
   });
+  // Reload both lists after any change
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ["watchlists"] });
     qc.invalidateQueries({ queryKey: ["alerts"] });
   };
 
+  // Create a watchlist from the form ("a, b, c" -> ["a", "b", "c"])
   const create = useMutation({
     mutationFn: () =>
       api.createWatchlist({ name: name.trim(), terms: terms.split(",").map((t) => t.trim()).filter(Boolean) }),
@@ -44,9 +43,11 @@ export function Alerts() {
     },
     onError: (e: Error) => setFormError(e.message),
   });
+  // Delete a watchlist / mark alerts as seen
   const remove = useMutation({ mutationFn: api.deleteWatchlist, onSuccess: refresh });
   const seen = useMutation({ mutationFn: (ids?: number[]) => api.markAlertsSeen(ids), onSuccess: refresh });
 
+  // Alerts not yet seen
   const items = alerts.data?.items ?? [];
   const unseen = items.filter((a) => !a.seen);
 
@@ -59,6 +60,7 @@ export function Alerts() {
 
       <div className="grid grid-cols-12 gap-y-8 lg:gap-x-10">
         <aside className="col-span-12 min-w-0 lg:col-span-4">
+          {/* New watchlist form */}
           <form
             className="mb-6 space-y-3 border border-text bg-surface-1 p-4"
             onSubmit={(e) => {
@@ -92,6 +94,7 @@ export function Alerts() {
 
           <h3 className="m-0 mb-2 text-sm font-bold">Watchlists</h3>
           {lists.isError && <QueryError what="watchlists" error={lists.error} onRetry={() => lists.refetch()} />}
+          {/* Watchlists: click one to filter the alerts */}
           <ul className="m-0 list-none p-0">
             <li>
               <button onClick={() => setFilterId(null)} aria-current={filterId === null}
@@ -131,6 +134,7 @@ export function Alerts() {
         </aside>
 
         <section className="col-span-12 min-w-0 lg:col-span-8">
+          {/* Header + "mark all as seen" */}
           <div className="mb-2 flex items-baseline border-b-2 border-rule pb-1.5">
             <h3 className="m-0 text-[1rem] font-bold">Mentions</h3>
             {unseen.length > 0 && (
@@ -145,6 +149,7 @@ export function Alerts() {
               {lists.data?.items.length ? "No post mentions these terms yet." : "Create a watchlist to start getting alerts."}
             </p>
           )}
+          {/* One row per alert; opening it marks it seen */}
           <ul className="m-0 list-none p-0">
             {items.map((a) => (
               <li key={a.id}>

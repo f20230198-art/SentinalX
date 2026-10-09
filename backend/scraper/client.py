@@ -1,13 +1,5 @@
-"""HTTP client for the synthetic darknet forum, routed through Tor SOCKS5.
-
-DNS-through-proxy note:
-    For .onion addresses your local DNS cannot resolve the hostname — only Tor
-    can. Many SOCKS clients use the 'socks5h://' scheme to opt into proxy-side
-    DNS. httpx (with httpx[socks] / socksio) does NOT recognize 'socks5h://'
-    as a scheme, but its SOCKS5 transport already resolves hostnames remotely
-    by default, so a plain 'socks5://' URL behaves the way 'socks5h://' would
-    in curl/requests-land. Don't change this back to 'socks5h://' — httpx
-    will raise "Unknown scheme for proxy URL".
+"""HTTP client for the DarkBay forum API via Tor.
+Note: keep socks5:// (not socks5h://) - httpx already resolves .onion through Tor.
 """
 
 from __future__ import annotations
@@ -17,6 +9,7 @@ from typing import Any
 
 import httpx
 
+# Tor's local proxy, and the file where Tor writes DarkBay's .onion address
 DEFAULT_SOCKS_PROXY = "socks5://127.0.0.1:9050"
 DEFAULT_HOSTNAME_FILE = Path(__file__).resolve().parents[2] / "darknet" / "darkbay" / "tor" / "hidden_service" / "hostname"
 
@@ -24,6 +17,7 @@ DEFAULT_HOSTNAME_FILE = Path(__file__).resolve().parents[2] / "darknet" / "darkb
 DEFAULT_TIMEOUT = httpx.Timeout(connect=30.0, read=60.0, write=30.0, pool=60.0)
 
 
+# Read DarkBay's .onion address from the file Tor created
 def read_onion_hostname(path: Path = DEFAULT_HOSTNAME_FILE) -> str:
     if not path.exists():
         raise FileNotFoundError(
@@ -36,6 +30,7 @@ def read_onion_hostname(path: Path = DEFAULT_HOSTNAME_FILE) -> str:
     return addr
 
 
+# Talks to DarkBay's JSON API through Tor
 class ForumClient:
     def __init__(
         self,
@@ -43,6 +38,7 @@ class ForumClient:
         proxy: str = DEFAULT_SOCKS_PROXY,
         timeout: httpx.Timeout = DEFAULT_TIMEOUT,
     ) -> None:
+        # Every request goes through the Tor proxy
         self.base_url = f"http://{onion}"
         self._client = httpx.Client(proxy=proxy, timeout=timeout, follow_redirects=False)
 
@@ -55,6 +51,7 @@ class ForumClient:
     def close(self) -> None:
         self._client.close()
 
+    # Get posts newer than `since` from /api/posts
     def fetch_posts(
         self,
         since: float,

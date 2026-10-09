@@ -6,6 +6,7 @@ from backend.api import watch
 from backend.db.store import Store
 
 
+# Helper: build a fake post dict
 def post(pid, title, body):
     return {"id": pid, "thread_id": pid, "thread_title": title, "category": "c",
             "author": "a", "body": body, "created_at": float(pid)}

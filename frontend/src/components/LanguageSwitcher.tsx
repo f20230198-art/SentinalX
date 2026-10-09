@@ -1,11 +1,4 @@
-/**
- * Language switcher for the console header.
- *
- * A compact segmented control matching the terminal aesthetic — the same
- * bracketed-mono style as the [ CRT ] toggle next to it. Selecting a language
- * calls i18next; the choice is persisted to localStorage by the detector
- * configured in src/i18n/index.ts, so it survives reloads.
- */
+/** Language picker in the header (choice is saved in localStorage). */
 
 import { useTranslation } from "react-i18next";
 import { SUPPORTED_LANGUAGES } from "../i18n";
@@ -21,6 +14,7 @@ export function LanguageSwitcher() {
       role="group"
       aria-label={t("common.language")}
     >
+      {/* One button per language; clicking it switches the whole UI */}
       {SUPPORTED_LANGUAGES.map((lng) => {
         const isActive = lng.code === active;
         return (

@@ -1,8 +1,5 @@
 #!/bin/sh
-# Fix ownership of the bind-mounted hidden service dir at runtime, then drop
-# privileges to debian-tor. Bind mounts on Docker Desktop (Windows/macOS) come
-# in as root-owned regardless of what the image set, and Tor refuses to start
-# if HiddenServiceDir isn't owned by the running user with mode 700.
+# Fix hidden-service folder permissions (Tor needs owner + mode 700), then run Tor as debian-tor
 set -e
 
 HS_DIR=/var/lib/tor/sentinelx_forum

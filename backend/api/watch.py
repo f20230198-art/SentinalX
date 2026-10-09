@@ -1,10 +1,4 @@
-"""Watchlists: saved terms that turn matching posts into alerts.
-
-Matching runs on read (`check_all` is called by the API before it lists
-watchlists or alerts) and is incremental per watchlist via `last_post_id`,
-so it stays cheap as the corpus grows. A term matches as an exact phrase in
-a post's title, body or English translation (FTS5), case-insensitive.
-"""
+"""Watchlists: saved terms; new posts that match them become alerts."""
 
 from __future__ import annotations
 
@@ -14,10 +8,12 @@ import sqlite3
 import time
 from typing import Any
 
+# Max terms per watchlist
 MAX_TERMS = 25
 
 
 def _clean_terms(terms: list[Any]) -> list[str]:
+    # Clean up terms: trim spaces, 2-100 chars, no duplicates (ignoring case)
     out: list[str] = []
     for t in terms:
         t = re.sub(r"\s+", " ", str(t)).strip()
@@ -33,17 +29,21 @@ def _phrase(term: str) -> str:
 
 
 def _match_terms(text: str, terms: list[str]) -> list[str]:
+    # Which of the terms appear in the text (ignoring case)
     low = text.lower()
     return [t for t in terms if t.lower() in low]
 
 
 def check(conn: sqlite3.Connection, wl: sqlite3.Row) -> int:
     """Scan posts newer than this watchlist's cursor; record hits. Returns new hits."""
+    # Build one full-text query: "term1" OR "term2" ...
     terms = json.loads(wl["terms_json"])
     queries = [q for q in (_phrase(t) for t in terms) if q]
     max_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM raw_posts").fetchone()[0]
+    # No terms, or no new posts since last check -> nothing to do
     if not queries or max_id <= wl["last_post_id"]:
         return 0
+    # Search only posts newer than the last check
     rows = conn.execute(
         """
         SELECT rp.id, rp.thread_title, rp.body, COALESCE(rp.body_en, '') AS body_en
@@ -52,10 +52,10 @@ def check(conn: sqlite3.Connection, wl: sqlite3.Row) -> int:
         """,
         (" OR ".join(queries), wl["last_post_id"]),
     ).fetchall()
+    # Save each matching post as an alert (INSERT OR IGNORE skips repeats)
     now, new = time.time(), 0
     for r in rows:
-        # FTS tokenisation can match "acme-corp" for "acme corp"; report the
-        # literal terms found when possible, else the first term.
+        # Report the exact terms found (fall back to the first term)
         matched = _match_terms(f"{r['thread_title']}\n{r['body']}\n{r['body_en']}", terms) or terms[:1]
         cur = conn.execute(
             "INSERT OR IGNORE INTO watch_hits (watchlist_id, raw_post_id, matched_terms, created_at) "
@@ -63,16 +63,19 @@ def check(conn: sqlite3.Connection, wl: sqlite3.Row) -> int:
             (wl["id"], r["id"], json.dumps(matched), now),
         )
         new += cur.rowcount
+    # Move the cursor forward so these posts aren't checked again
     conn.execute("UPDATE watchlists SET last_post_id = ? WHERE id = ?", (max_id, wl["id"]))
     conn.commit()
     return new
 
 
 def check_all(conn: sqlite3.Connection) -> int:
+    # Check every watchlist; returns total new alerts
     return sum(check(conn, wl) for wl in conn.execute("SELECT * FROM watchlists").fetchall())
 
 
 def create(conn: sqlite3.Connection, name: str, terms: list[Any]) -> dict:
+    # Clean the terms and save the watchlist
     clean = _clean_terms(terms)
     if not clean:
         raise ValueError("Add at least one term of 2 or more characters.")
@@ -82,9 +85,7 @@ def create(conn: sqlite3.Connection, name: str, terms: list[Any]) -> dict:
     )
     conn.commit()
     wl = conn.execute("SELECT * FROM watchlists WHERE id = ?", (cur.lastrowid,)).fetchone()
-    # Backfill against everything already collected so a new watchlist shows
-    # past mentions immediately, but mark them seen: whoever creates a
-    # watchlist wants the history, not 40 "new" alerts at once.
+    # Match existing posts too, but mark them seen so they don't flood as "new"
     check(conn, wl)
     conn.execute("UPDATE watch_hits SET seen = 1 WHERE watchlist_id = ?", (wl["id"],))
     conn.commit()
@@ -92,6 +93,7 @@ def create(conn: sqlite3.Connection, name: str, terms: list[Any]) -> dict:
 
 
 def get(conn: sqlite3.Connection, wid: int) -> dict:
+    # One watchlist plus its alert counts
     wl = conn.execute("SELECT * FROM watchlists WHERE id = ?", (wid,)).fetchone()
     if wl is None:
         raise KeyError(wid)
@@ -104,6 +106,7 @@ def get(conn: sqlite3.Connection, wid: int) -> dict:
             "created_at": wl["created_at"], "hits": counts["total"], "unseen": counts["unseen"]}
 
 
+# All watchlists, newest first
 def list_all(conn: sqlite3.Connection) -> list[dict]:
     return [get(conn, r["id"]) for r in conn.execute("SELECT id FROM watchlists ORDER BY created_at DESC")]
 
@@ -115,6 +118,7 @@ def delete(conn: sqlite3.Connection, wid: int) -> bool:
 
 
 def alerts(conn: sqlite3.Connection, watchlist_id: int | None = None, limit: int = 100) -> list[dict]:
+    # Alerts (optionally for one watchlist), unseen first, newest first
     where, args = ("WHERE h.watchlist_id = ?", [watchlist_id]) if watchlist_id else ("", [])
     rows = conn.execute(
         f"""
@@ -136,6 +140,7 @@ def alerts(conn: sqlite3.Connection, watchlist_id: int | None = None, limit: int
 
 
 def mark_seen(conn: sqlite3.Connection, ids: list[int] | None) -> int:
+    # Mark the given alerts as seen, or all of them if no ids are given
     if ids:
         q = ",".join("?" for _ in ids)
         cur = conn.execute(f"UPDATE watch_hits SET seen = 1 WHERE id IN ({q})", ids)

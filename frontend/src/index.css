@@ -1,19 +1,8 @@
 @import "tailwindcss";
 
-/*
- * SentinelX design tokens — Swiss / evidence-register world.
- *
- * Tailwind v4 reads @theme and emits utilities (`bg-base`, `text-accent`, …).
- * Token NAMES are kept from the previous theme so every page restyles from
- * here; only the values changed. Colour strategy: restrained — cool paper
- * neutrals, ink, and one signal red that marks what matters or can be acted
- * on. Amber is reserved for "degraded / needs attention", never decoration.
- * Light, because the use scene is a lit office desk and screen-share demos.
- */
+/* Design tokens (colours + fonts); Tailwind turns these into classes like bg-base */
 @theme {
-  /* Dark field green. One hue family for every surface; contrast comes from
-   * lightness steps, not borders-and-glows. Text is a warm off-white, the
-   * signal is a coral red that stays legible on green. */
+  /* Dark green surfaces, off-white text, coral accent */
   --color-base: #0b1612;          /* page ground: deep field green */
   --color-deep: #08110e;
   --color-surface-1: #11211b;     /* sheets / panels */
@@ -95,9 +84,7 @@ table, .tabular, time {
   scrollbar-color: var(--color-border-soft) transparent;
 }
 
-/* ---- Register section heading ---------------------------------------
- * Swiss rule: a heavy ink rule above, the title flush left, metadata flush
- * right. No section numbers, no eyebrow. */
+/* Section heading: heavy rule on top, title left, info right */
 .section-divider {
   display: flex;
   align-items: baseline;
@@ -117,8 +104,7 @@ table, .tabular, time {
   font-variant-numeric: tabular-nums;
 }
 
-/* Hatched fill = "semantic match" provenance. Pattern, not just colour, so
- * the three provenance kinds read in greyscale and for colour-blind users. */
+/* Hatched fill = semantic match */
 .hatch-info {
   background-image: repeating-linear-gradient(
     -45deg,
@@ -157,8 +143,7 @@ table, .tabular, time {
   to { opacity: 1; transform: none; }
 }
 
-/* Long unbroken tokens (hashes, URLs, wallet addresses) in post text must
- * wrap inside their box instead of pushing it wider. */
+/* Let long hashes/URLs wrap instead of overflowing */
 pre,
 code {
   overflow-wrap: anywhere;

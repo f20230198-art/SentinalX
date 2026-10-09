@@ -1,17 +1,4 @@
-"""Match a post against the MITRE ATT&CK corpus.
-
-Two paths per post:
-
-1. Verify LLM candidates: the techniques_json column from llm_analyses is a
-   list of {id, name, evidence} dicts. For each, check whether the id exists
-   in the corpus -- 'llm_verified' if yes, 'llm_unverified' if no (LLM
-   hallucinated or referenced a deprecated/sub-technique not loaded).
-
-2. Semantic discovery: embed the post body, compute cosine similarity against
-   every technique vector, take the top-k whose score >= threshold. Skip any
-   technique already covered by the LLM-verified set (no double-counting).
-   Source = 'semantic'.
-"""
+"""Match a post to MITRE techniques: verify LLM-suggested T-codes + semantic similarity search."""
 
 from __future__ import annotations
 
@@ -23,9 +10,11 @@ from typing import Iterable
 
 import numpy as np
 
+# Valid technique ID shape: T1234 or T1234.001
 T_CODE_RE = re.compile(r"^T\d{4}(?:\.\d{3})?$")
 
 
+# One technique matched to a post, plus how it was found and why
 @dataclass(frozen=True)
 class Match:
     technique_id: str
@@ -43,16 +32,14 @@ def normalise_tcode(raw: str) -> str | None:
 
 
 def parse_llm_candidates(techniques_json: str | None) -> list[dict]:
-    """The LLM techniques_json column holds {techniques: [...], behaviour: [...]}
-    or sometimes just [...]. We normalise to a list of dicts with at least id
-    + optional name/evidence.
-    """
+    """Normalise the LLM techniques JSON into a list of {id, name, evidence} dicts."""
     if not techniques_json:
         return []
     try:
         data = json.loads(techniques_json)
     except json.JSONDecodeError:
         return []
+    # Reply can be {"techniques": [...]} or just [...]
     items = data.get("techniques", []) if isinstance(data, dict) else data
     out: list[dict] = []
     for it in items if isinstance(items, list) else []:
@@ -66,11 +53,13 @@ def parse_llm_candidates(techniques_json: str | None) -> list[dict]:
 def verify_llm(candidates: list[dict], corpus_ids: set[str]) -> list[Match]:
     out: list[Match] = []
     seen: set[str] = set()
+    # Check each LLM-suggested T-code really exists in MITRE
     for c in candidates:
         tcode = normalise_tcode(c.get("id", ""))
         if not tcode or tcode in seen:
             continue
         seen.add(tcode)
+        # Exists -> verified; doesn't exist -> unverified (probably made up)
         source = "llm_verified" if tcode in corpus_ids else "llm_unverified"
         evidence = c.get("evidence")
         out.append(Match(tcode, source, None, evidence if isinstance(evidence, str) else None))
@@ -78,17 +67,12 @@ def verify_llm(candidates: list[dict], corpus_ids: set[str]) -> list[Match]:
 
 
 def chunk_text(text: str, max_words: int = 150, overlap: int = 30) -> list[str]:
-    """Split a post into overlapping word windows for embedding.
-
-    all-MiniLM-L6-v2 reads at most 256 word-pieces; anything after that is
-    silently truncated, so a technique described late in a long post would
-    never be seen. ~150 words stays under that limit with headroom for
-    word-piece splitting. The overlap keeps a sentence that straddles a
-    boundary intact in at least one chunk. Short posts return one chunk.
-    """
+    """Split text into overlapping ~150-word chunks (MiniLM only reads ~256 tokens)."""
+    # Short text -> one chunk
     words = text.split()
     if len(words) <= max_words:
         return [text]
+    # Each chunk starts `step` words after the previous one, so chunks overlap a bit
     step = max_words - overlap
     return [
         " ".join(words[i:i + max_words])
@@ -104,25 +88,22 @@ def semantic_topk(
     threshold: float,
     exclude: set[str],
 ) -> list[Match]:
-    """Return up to topk Matches whose cosine score >= threshold and whose
-    technique_id is not in `exclude`. Vectors are assumed L2-normalised so
-    cosine = dot product.
-
-    `post_vec` is either one vector (D,) or a stack of chunk vectors (C, D).
-    With chunks, a technique's score is its BEST match over any chunk
-    (max-pooling), so one relevant paragraph is enough to surface it.
-    """
+    """Top-k techniques above threshold (best chunk score wins), skipping `exclude`."""
+    # No techniques loaded -> nothing to match
     if corpus_matrix.shape[0] == 0:
         return []
+    # Similarity of every technique to the post (for chunks, keep each technique's best chunk)
     if post_vec.ndim == 2:
         scores = (corpus_matrix @ post_vec.T).max(axis=1)  # (N, C) -> (N,)
     else:
         scores = corpus_matrix @ post_vec  # (N,)
     # Take more than topk so we can drop excluded ones and still have headroom.
     n_candidates = min(len(scores), topk + len(exclude) + 5)
+    # Sort the best candidates, highest score first
     top_idx = np.argpartition(-scores, n_candidates - 1)[:n_candidates]
     top_idx = top_idx[np.argsort(-scores[top_idx])]
     out: list[Match] = []
+    # Keep up to topk that pass the threshold and weren't already found by the LLM
     for i in top_idx:
         if len(out) >= topk:
             break
@@ -140,12 +121,14 @@ def load_corpus(conn: sqlite3.Connection) -> tuple[list[str], np.ndarray, set[st
     """Load the embedding matrix from mitre_techniques. Returns (ids, matrix, id_set)."""
     from backend.mitre.embed import from_blob, EMBED_DIM
 
+    # Read every technique's stored vector
     rows = conn.execute(
         "SELECT technique_id, embedding FROM mitre_techniques "
         "WHERE embedding IS NOT NULL ORDER BY technique_id"
     ).fetchall()
     if not rows:
         return [], np.zeros((0, EMBED_DIM), dtype=np.float32), set()
+    # Stack them into one matrix so we can score all techniques at once
     ids = [r["technique_id"] for r in rows]
     matrix = np.vstack([from_blob(r["embedding"]) for r in rows])
     return ids, matrix, set(ids)

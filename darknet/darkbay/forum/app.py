@@ -1,22 +1,5 @@
-"""
-Synthetic darknet forum — Flask app.
-
-Serves a phpBB-style forum out of a SQLite database. Designed to run as a Tor
-hidden service so the SentinelX scraper exercises the same SOCKS5/.onion plumbing
-it would use against real darknet sites — without the legal/ethical/availability
-problems of scraping the real ones.
-
-Endpoints:
-    GET /                       Front page: list of recent threads + category nav.
-    GET /category/<slug>        Threads filtered by category.
-    GET /thread/<int:thread_id> Single thread with all posts.
-    GET /api/posts              JSON list of posts. Supports ?since=<unix_ts>
-                                for incremental polling by the scraper.
-    GET /api/post/<int:post_id> Single post as JSON.
-    GET /healthz                Liveness check.
-
-Database file path is read from FORUM_DB env var (default: /data/forum.db inside
-the container; ./forum.db when running locally).
+"""DarkBay: fake darknet forum (Flask) served over Tor for testing the scraper.
+Has HTML pages plus a JSON API (/api/posts?since=...) the scraper uses.
 """
 
 from __future__ import annotations
@@ -33,6 +16,7 @@ from flask import Flask, abort, g, jsonify, render_template, request
 # Config
 # --------------------------------------------------------------------------- #
 
+# Database file (FORUM_DB env var, or forum.db next to this file)
 DB_PATH = os.environ.get(
     "FORUM_DB",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "forum.db"),
@@ -46,10 +30,7 @@ app = Flask(__name__)
 # --------------------------------------------------------------------------- #
 
 def get_db() -> sqlite3.Connection:
-    """One sqlite connection per request, attached to flask.g.
-
-    Using Row factory so we get dict-like access to columns.
-    """
+    """One DB connection per request."""
     if "db" not in g:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
@@ -59,6 +40,7 @@ def get_db() -> sqlite3.Connection:
     return g.db
 
 
+# Close the DB connection when the request ends
 @app.teardown_appcontext
 def close_db(exc: BaseException | None) -> None:
     db = g.pop("db", None)
@@ -66,6 +48,7 @@ def close_db(exc: BaseException | None) -> None:
         db.close()
 
 
+# DB row -> plain dict (for JSON)
 def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {k: row[k] for k in row.keys()}
 
@@ -74,6 +57,7 @@ def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
 # HTML routes
 # --------------------------------------------------------------------------- #
 
+# Front page: latest 50 threads (most recently active first) + category list
 @app.route("/")
 def index():
     db = get_db()
@@ -97,6 +81,7 @@ def index():
     return render_template("index.html", threads=threads, categories=categories)
 
 
+# Threads in one category
 @app.route("/category/<slug>")
 def category(slug: str):
     db = get_db()
@@ -118,6 +103,7 @@ def category(slug: str):
     return render_template("category.html", category=slug, threads=threads)
 
 
+# One thread with all its posts, oldest first
 @app.route("/thread/<int:thread_id>")
 def thread(thread_id: int):
     db = get_db()
@@ -135,16 +121,13 @@ def thread(thread_id: int):
 # JSON API (what the scraper uses by default)
 # --------------------------------------------------------------------------- #
 
+# The scraper's main endpoint: posts newer than ?since=
 @app.route("/api/posts")
 def api_posts():
-    """List posts. Optional filters:
-
-    since=<unix_ts>     Only posts created strictly after this timestamp.
-    limit=<int>         Max rows (default 200, capped at 1000).
-    category=<slug>     Filter by thread category.
-    """
+    """List posts; filters: since, limit (max 1000), category."""
     db = get_db()
 
+    # Read the query params (bad values fall back to defaults)
     try:
         since = float(request.args.get("since", 0))
     except ValueError:
@@ -155,6 +138,7 @@ def api_posts():
         limit = 200
     category = request.args.get("category")
 
+    # Build the SQL, adding the category filter only if given
     sql = [
         "SELECT p.id, p.thread_id, p.author, p.body, p.created_at,",
         "       t.title AS thread_title, t.category",
@@ -179,29 +163,18 @@ def api_posts():
     )
 
 
+# POST /api/threads
 @app.route("/api/threads", methods=["POST"])
 def api_create_thread():
-    """Create a new thread + opening post in one shot.
-
-    Used by the demo flow to inject fresh content during a live walkthrough,
-    so the rest of the SentinelX pipeline (scrape → extract → LLM → MITRE
-    → timeline) can light up against genuinely new data instead of replaying
-    the seed corpus.
-
-    Body:
-        {
-          "title":    str,
-          "category": str   # one of the 5 seeded categories
-          "author":   str,
-          "body":     str
-        }
-    """
+    """Create a thread + first post (used to add fresh data during demos)."""
+    # Check all fields are present
     data = request.get_json(silent=True) or {}
     required = ("title", "category", "author", "body")
     missing = [k for k in required if not data.get(k)]
     if missing:
         return jsonify({"error": f"missing: {', '.join(missing)}"}), 400
 
+    # Save the thread, then its first post
     now = datetime.now(timezone.utc).timestamp()
     db = get_db()
     cur = db.execute(
@@ -226,6 +199,7 @@ def api_create_thread():
     ), 201
 
 
+# One post as JSON
 @app.route("/api/post/<int:post_id>")
 def api_post(post_id: int):
     db = get_db()
@@ -242,6 +216,7 @@ def api_post(post_id: int):
     return jsonify(row_to_dict(row))
 
 
+# Liveness check: can we open the DB?
 @app.route("/healthz")
 def healthz():
     try:
@@ -256,6 +231,7 @@ def healthz():
 # Template filters
 # --------------------------------------------------------------------------- #
 
+# Unix time -> "2026-01-31 14:05 UTC" in templates
 @app.template_filter("fmt_ts")
 def fmt_ts(value: float | int | None) -> str:
     if value is None:

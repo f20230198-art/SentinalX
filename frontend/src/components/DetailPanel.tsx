@@ -7,6 +7,7 @@ import { api, type PostDetail, type PostMitigation } from "../lib/api";
 import { ProvenanceLegend, ProvenanceMark, QueryError } from "./Evidence";
 import { PROVENANCE, type Provenance } from "../lib/palette";
 
+// Side panel that slides in from the right and shows everything about one post
 export function DetailPanel({
   id,
   onClose,
@@ -15,6 +16,7 @@ export function DetailPanel({
   onClose: () => void;
 }) {
   const { t } = useTranslation();
+  // Load the post's details (only when a post is selected)
   const detail = useQuery({
     queryKey: ["post", id],
     queryFn: () => api.post(id!),
@@ -29,6 +31,7 @@ export function DetailPanel({
   }, [id, onClose]);
   return (
     <AnimatePresence>
+      {/* Slide in when a post is selected, slide out when closed */}
       {id !== null && (
         <motion.aside
           key={id}
@@ -41,6 +44,7 @@ export function DetailPanel({
           className="fixed top-0 right-0 bottom-0 z-40 w-[min(560px,100vw)] overflow-y-auto border-l-2 border-rule bg-surface-1 shadow-[-12px_0_32px_rgba(0,0,0,0.5)]"
         >
           <div className="px-6 py-5">
+            {/* Top row: post number + close button */}
             <div className="flex items-center justify-between mb-4">
               <span className="font-mono text-sm text-text-muted">
                 {t("post.title", { id })}
@@ -53,6 +57,7 @@ export function DetailPanel({
               </button>
             </div>
 
+            {/* Loading, error, or the post itself */}
             {detail.isLoading && (
               <p className="text-sm text-text-muted">{t("common.loading")}</p>
             )}
@@ -67,14 +72,14 @@ export function DetailPanel({
   );
 }
 
+// The panel's content, section by section
 function DetailBody({ d }: { d: PostDetail }) {
   const { t } = useTranslation();
-  // A post is "translated" when the backend stored an English translation —
-  // i.e. it was non-English. body_en is null for English posts (and for posts
-  // ingested before multilingual support landed).
+  // Translated = has an English translation and wasn't English
   const isTranslated = !!d.post.body_en && d.post.lang !== "en";
   return (
     <div className="space-y-5">
+      {/* Category, author, translated badge, title, date */}
       <header>
         <div className="flex items-center gap-2 text-sm text-text-muted">
           <span>
@@ -93,6 +98,7 @@ function DetailBody({ d }: { d: PostDetail }) {
         </div>
       </header>
 
+      {/* LLM summary */}
       {d.analysis?.summary && (
         <section>
           <SectionLabel>{t("post.llmSummary")}</SectionLabel>
@@ -100,6 +106,7 @@ function DetailBody({ d }: { d: PostDetail }) {
         </section>
       )}
 
+      {/* Post text (translation toggle if non-English) */}
       <PostBody
         body={d.post.body}
         bodyEn={d.post.body_en}
@@ -107,6 +114,7 @@ function DetailBody({ d }: { d: PostDetail }) {
         isTranslated={isTranslated}
       />
 
+      {/* MITRE techniques, each with where the match came from */}
       {d.techniques.length > 0 && (
         <section>
           <SectionLabel>
@@ -138,6 +146,7 @@ function DetailBody({ d }: { d: PostDetail }) {
         </section>
       )}
 
+      {/* Recommended defences */}
       {d.mitigations.length > 0 && (
         <section>
           <SectionLabel>
@@ -154,6 +163,7 @@ function DetailBody({ d }: { d: PostDetail }) {
         </section>
       )}
 
+      {/* IOCs: click one to open its pivot page */}
       {d.iocs.length > 0 && (
         <section>
           <SectionLabel>{t("post.iocs", { count: d.iocs.length })}</SectionLabel>
@@ -174,6 +184,7 @@ function DetailBody({ d }: { d: PostDetail }) {
         </section>
       )}
 
+      {/* Named entities */}
       {d.entities.length > 0 && (
         <section>
           <SectionLabel>
@@ -193,8 +204,7 @@ function DetailBody({ d }: { d: PostDetail }) {
   );
 }
 
-/** Human-readable name for an ISO language code, via the i18n catalog.
- *  Falls back to the upper-cased code for languages not in the catalog. */
+/** Language name for an ISO code (falls back to the code itself). */
 function useLanguageName() {
   const { t } = useTranslation();
   return (lang: string | null): string => {
@@ -218,9 +228,7 @@ function LanguageBadge({ lang }: { lang: string | null }) {
   );
 }
 
-/** Post body section. For a translated post it shows the English translation
- *  by default with a toggle to the original-language source; the LLM analysis
- *  ran on the English text, so that is the more useful default view. */
+/** Post body: shows the English translation by default, with a toggle to the original. */
 function PostBody({
   body,
   bodyEn,
@@ -248,6 +256,7 @@ function PostBody({
     );
   }
 
+  // Show the translation unless the user switched to the original
   const displayed = showOriginal ? body : bodyEn;
   return (
     <section>
@@ -276,6 +285,7 @@ function PostBody({
   );
 }
 
+// One mitigation: id, name, which techniques it counters, description, link
 function MitigationItem({ m }: { m: PostMitigation }) {
   return (
     <li className="border border-border-soft bg-surface-1/30 px-3 py-2">
@@ -306,6 +316,7 @@ function MitigationItem({ m }: { m: PostMitigation }) {
   );
 }
 
+// Small heading used by every section in the panel
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
     <h3 className="m-0 mb-2 border-t-2 border-rule pt-2 text-sm font-bold">

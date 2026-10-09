@@ -1,11 +1,4 @@
-"""Fetch and parse the official MITRE ATT&CK Enterprise STIX 2.1 corpus.
-
-The corpus is a single ~30 MB JSON file in the public mitre/cti GitHub mirror.
-We cache it under data/mitre/ so re-runs don't re-download. We extract only
-attack-pattern objects (techniques + sub-techniques), drop revoked/deprecated
-ones, normalise to a flat record shape, and return the list. Embedding +
-persistence happens in embed.py / run.py.
-"""
+"""Download (cached) and parse the MITRE ATT&CK technique data."""
 
 from __future__ import annotations
 
@@ -15,15 +8,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+# Official MITRE ATT&CK data file (published on GitHub)
 MITRE_URL = (
     "https://raw.githubusercontent.com/mitre/cti/master/"
     "enterprise-attack/enterprise-attack.json"
 )
 
+# Where the downloaded file is kept so we only download once
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CACHE = REPO_ROOT / "data" / "mitre" / "enterprise-attack.json"
 
 
+# One MITRE technique, e.g. T1566 Phishing
 @dataclass(frozen=True)
 class Technique:
     technique_id: str
@@ -35,6 +31,7 @@ class Technique:
     parent_id: str | None
 
 
+# One MITRE mitigation, e.g. M1017 User Training
 @dataclass(frozen=True)
 class Mitigation:
     mitigation_id: str
@@ -43,6 +40,7 @@ class Mitigation:
     url: str | None
 
 
+# "This mitigation helps against this technique"
 @dataclass(frozen=True)
 class MitigationLink:
     technique_id: str
@@ -51,9 +49,11 @@ class MitigationLink:
 
 def download(cache_path: Path = DEFAULT_CACHE, force: bool = False) -> Path:
     """Download the corpus JSON to cache_path. Skips if file already exists."""
+    # Already downloaded? Use the local copy
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     if cache_path.exists() and not force:
         return cache_path
+    # Otherwise download and save it
     with urllib.request.urlopen(MITRE_URL, timeout=120) as resp:
         data = resp.read()
     cache_path.write_bytes(data)
@@ -61,6 +61,7 @@ def download(cache_path: Path = DEFAULT_CACHE, force: bool = False) -> Path:
 
 
 def _external_id_and_url(obj: dict) -> tuple[str | None, str | None]:
+    # Find the official MITRE id (T1566 / M1017) and its web page
     for ref in obj.get("external_references", []):
         if ref.get("source_name") == "mitre-attack":
             return ref.get("external_id"), ref.get("url")
@@ -68,14 +69,11 @@ def _external_id_and_url(obj: dict) -> tuple[str | None, str | None]:
 
 
 def parse(cache_path: Path = DEFAULT_CACHE) -> list[Technique]:
-    """Parse cached STIX JSON into a flat list of Technique records.
-
-    Filters: only attack-pattern, drop revoked/deprecated, must have an
-    mitre-attack external_id (T-code).
-    """
+    """Parse cached STIX into Technique records (skips revoked/deprecated)."""
     raw = json.loads(cache_path.read_text(encoding="utf-8"))
     objects = raw.get("objects", [])
 
+    # Pass 1: map MITRE's internal ids to T-codes (skip retired techniques)
     # Build a STIX-id -> T-code map for parent lookup of sub-techniques.
     stix_to_tcode: dict[str, str] = {}
     for o in objects:
@@ -87,8 +85,7 @@ def parse(cache_path: Path = DEFAULT_CACHE) -> list[Technique]:
         if tcode:
             stix_to_tcode[o["id"]] = tcode
 
-    # Sub-technique relationships are recorded as relationship objects with
-    # relationship_type == 'subtechnique-of'. Map child STIX id -> parent STIX id.
+    # Map sub-technique -> parent technique
     sub_parent: dict[str, str] = {}
     for o in objects:
         if o.get("type") == "relationship" and o.get("relationship_type") == "subtechnique-of":
@@ -97,6 +94,7 @@ def parse(cache_path: Path = DEFAULT_CACHE) -> list[Technique]:
             if child and parent:
                 sub_parent[child] = parent
 
+    # Pass 2: build a Technique record for every active technique
     out: list[Technique] = []
     for o in objects:
         if o.get("type") != "attack-pattern":
@@ -106,11 +104,13 @@ def parse(cache_path: Path = DEFAULT_CACHE) -> list[Technique]:
         tcode, url = _external_id_and_url(o)
         if not tcode:
             continue
+        # Tactics = which attack phase(s) it belongs to (e.g. initial-access)
         tactics = tuple(
             phase.get("phase_name", "")
             for phase in o.get("kill_chain_phases", [])
             if phase.get("kill_chain_name") == "mitre-attack"
         )
+        # For sub-techniques (T1566.001), find the parent's T-code
         is_sub = bool(o.get("x_mitre_is_subtechnique"))
         parent_stix = sub_parent.get(o["id"])
         parent_tcode = stix_to_tcode.get(parent_stix) if parent_stix else None
@@ -136,22 +136,11 @@ def fetch_and_parse(cache_path: Path = DEFAULT_CACHE, force_download: bool = Fal
 def parse_mitigations(
     cache_path: Path = DEFAULT_CACHE,
 ) -> tuple[list[Mitigation], list[MitigationLink]]:
-    """Parse the official ATT&CK mitigations and their technique links.
-
-    MITRE records countermeasures as 'course-of-action' STIX objects (Mxxxx
-    codes) and connects them to techniques with 'relationship' objects whose
-    relationship_type is 'mitigates' (source = course-of-action, target =
-    attack-pattern). We resolve both STIX-id ends back to their Mxxxx / Txxxx
-    external ids so the join table is keyed by the same codes the rest of the
-    app uses.
-
-    Filters mirror parse(): drop revoked/deprecated objects, require an
-    mitre-attack external_id. Links whose technique end is missing from the
-    parsed technique set are dropped so the FK into mitre_techniques holds.
-    """
+    """Parse MITRE mitigations (Mxxxx) and which techniques they mitigate."""
     raw = json.loads(cache_path.read_text(encoding="utf-8"))
     objects = raw.get("objects", [])
 
+    # Collect all active mitigations and map their internal ids to M-codes
     # STIX-id -> external code, for both ends of the 'mitigates' relationship.
     coa_stix_to_mid: dict[str, str] = {}
     mitigations: list[Mitigation] = []
@@ -173,6 +162,7 @@ def parse_mitigations(
             )
         )
 
+    # Map technique internal ids to T-codes
     tech_stix_to_tcode: dict[str, str] = {}
     valid_tcodes: set[str] = set()
     for o in objects:
@@ -185,6 +175,7 @@ def parse_mitigations(
             tech_stix_to_tcode[o["id"]] = tcode
             valid_tcodes.add(tcode)
 
+    # Read the "mitigates" links and keep each (technique, mitigation) pair once
     links: list[MitigationLink] = []
     seen: set[tuple[str, str]] = set()
     for o in objects:

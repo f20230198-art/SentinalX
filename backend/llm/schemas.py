@@ -1,20 +1,4 @@
-"""Pydantic schemas for the three JSON-mode LLM outputs.
-
-`format=json` only guarantees the model emits *syntactically* valid JSON. It
-does not guarantee the right keys, types, or values — Mistral can return
-{"intent": "selling"} (not one of our labels), a confidence of 7, a string
-where a list belongs, or, if a scraped post contains a prompt-injection
-attempt, whatever shape the attacker asked for.
-
-Every JSON response is therefore validated here before it is persisted:
-  * wrong shape / types            -> rejected (caller records an error)
-  * intent outside INTENT_LABELS   -> rejected (closed vocabulary)
-  * confidence outside 0..1        -> clamped
-  * T-codes that aren't T#### form -> dropped (MITRE verification happens
-                                      later; this is only a shape check)
-  * oversized lists / strings      -> truncated, so a hostile post can't
-                                      bloat the DB through the model
-"""
+"""Pydantic schemas that check the LLM's JSON replies before saving (bad shape rejected, values clamped/trimmed)."""
 
 from __future__ import annotations
 
@@ -25,20 +9,25 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from backend.llm.prompts import INTENT_LABELS
 
+# Limits so a bad reply can't flood the DB
 MAX_LIST = 20
 MAX_STR = 300
+# Valid technique ID shape: T1234 or T1234.001
 _TCODE_RE = re.compile(r"^T\d{4}(?:\.\d{3})?$")
 
 
+# Trim and cap a string
 def _short(s: Any) -> str:
     return str(s).strip()[:MAX_STR]
 
 
+# Shape of the intent reply
 class IntentOut(BaseModel):
     intent: str
     confidence: float = 0.5
     reason: str = ""
 
+    # Intent must be one of our allowed labels
     @field_validator("intent", mode="before")
     @classmethod
     def _label(cls, v: Any) -> str:
@@ -47,6 +36,7 @@ class IntentOut(BaseModel):
             raise ValueError(f"intent {label!r} not in {INTENT_LABELS}")
         return label
 
+    # Confidence forced into 0..1 (falls back to 0.5)
     @field_validator("confidence", mode="before")
     @classmethod
     def _clamp(cls, v: Any) -> float:
@@ -61,6 +51,7 @@ class IntentOut(BaseModel):
         return _short(v or "")
 
 
+# Turn the value into a clean, capped list of strings
 def _str_list(v: Any) -> list[str]:
     if v is None:
         return []
@@ -71,6 +62,7 @@ def _str_list(v: Any) -> list[str]:
     return [_short(x) for x in v if isinstance(x, (str, int, float)) and str(x).strip()][:MAX_LIST]
 
 
+# Shape of the targets reply
 class TargetsOut(BaseModel):
     industries: list[str] = Field(default_factory=list)
     geographies: list[str] = Field(default_factory=list)
@@ -82,11 +74,13 @@ class TargetsOut(BaseModel):
         return _str_list(v)
 
 
+# One suggested technique
 class TechniqueItem(BaseModel):
     id: str
     name: str = ""
     evidence: str = ""
 
+    # ID must look like a real T-code
     @field_validator("id", mode="before")
     @classmethod
     def _tcode(cls, v: Any) -> str:
@@ -101,6 +95,7 @@ class TechniqueItem(BaseModel):
         return _short(v or "")
 
 
+# Shape of the techniques reply
 class TechniquesOut(BaseModel):
     techniques: list[TechniqueItem] = Field(default_factory=list)
     behaviour: list[str] = Field(default_factory=list)
@@ -108,8 +103,7 @@ class TechniquesOut(BaseModel):
     @field_validator("techniques", mode="before")
     @classmethod
     def _items(cls, v: Any) -> list:
-        # Keep the well-formed items, drop the malformed ones, instead of
-        # rejecting the whole response because one T-code was garbage.
+        # Drop only bad items instead of rejecting the whole reply
         if not isinstance(v, list):
             return []
         good = []
@@ -128,6 +122,7 @@ class TechniquesOut(BaseModel):
         return _str_list(v)
 
 
+# Which schema checks which prompt's reply
 SCHEMAS: dict[str, type[BaseModel]] = {
     "intent": IntentOut,
     "targets": TargetsOut,
@@ -137,10 +132,12 @@ SCHEMAS: dict[str, type[BaseModel]] = {
 
 def validate(name: str, data: dict | None) -> tuple[dict | None, str | None]:
     """Validate one parsed LLM response. Returns (clean_dict, error)."""
+    # Reply wasn't JSON at all, or wasn't a JSON object
     if data is None:
         return None, "unparseable JSON"
     if not isinstance(data, dict):
         return None, f"expected a JSON object, got {type(data).__name__}"
+    # Check against the schema and return the cleaned data
     try:
         return SCHEMAS[name].model_validate(data).model_dump(), None
     except ValidationError as e:

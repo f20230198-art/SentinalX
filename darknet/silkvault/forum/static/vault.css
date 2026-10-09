@@ -1,8 +1,4 @@
-/* SilkVault — synthetic darknet forum #2.
-   A deliberately different look from DarkBay: a sidebar layout, dark slate +
-   amber palette, card-based listing feed instead of a phpBB table. The visual
-   distinctness is the point — it underlines that this is a separate site the
-   scraper has to handle on its own terms. */
+/* SilkVault: sidebar + slate/amber card look (deliberately unlike DarkBay) */
 
 :root {
     --bg:        #14161c;

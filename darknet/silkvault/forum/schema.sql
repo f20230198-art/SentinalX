@@ -1,16 +1,4 @@
--- SilkVault synthetic darknet forum schema.
---
--- A second, deliberately *different* forum from DarkBay (darknet/darkbay/forum/). It
--- exists to prove the SentinelX scraper is not hardcoded to one site: SilkVault
--- has no JSON API at all — only HTML pages — so the scraper must parse markup.
---
--- Structural differences from DarkBay, on purpose:
---   * "listings" + "messages" instead of "threads" + "posts"
---   * a "board" column with vault-marketplace board names, not phpBB categories
---   * a "vendor" column (the seller handle) distinct from per-message author
---
--- Timestamps are Unix epoch floats, same as DarkBay, so the scraper's cursor
--- logic does not have to special-case date formats.
+-- SilkVault forum: listings and their messages (timestamps are Unix epoch)
 
 CREATE TABLE IF NOT EXISTS listings (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,

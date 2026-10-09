@@ -1,6 +1,4 @@
-# Tor daemon image for SentinelX.
-# Runs as root long enough to fix bind-mount ownership at startup, then drops
-# to the debian-tor user via setpriv before exec'ing tor itself.
+# Tor image for DarkBay (starts as root to fix folder permissions, then drops to debian-tor)
 
 FROM debian:bookworm-slim
 
@@ -18,6 +16,5 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 
 EXPOSE 9050
 
-# NOTE: stays as root so entrypoint can chown the bind mount; entrypoint then
-# drops privileges via setpriv before exec'ing tor.
+# Stays root so entrypoint can fix permissions first
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

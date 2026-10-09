@@ -1,15 +1,4 @@
-"""Generic page reader: turn ANY fetched HTML page into one SentinelX post.
-
-The forum scrapers understand two specific layouts (DarkBay's JSON API and
-SilkVault's markup). Pages found through search can be anything: a market
-listing, a paste, a leak site, a blog. This reader makes no layout
-assumptions: it strips non-content elements, keeps the title and the readable
-text, and returns a post dict in the same shape the scrapers produce, so
-`Store.insert_posts` and every downstream stage work unchanged.
-
-Identity: source_post_id is a stable 48-bit hash of the normalised URL, so
-re-reading the same page dedupes via UNIQUE(source, source_post_id).
-"""
+"""Turn any fetched HTML page into one SentinelX post (same shape the scrapers produce)."""
 
 from __future__ import annotations
 
@@ -22,12 +11,14 @@ from bs4 import BeautifulSoup
 
 # Elements that are never the content of a page.
 _DROP = ["script", "style", "noscript", "svg", "iframe", "form", "nav", "header", "footer", "aside"]
+# Body length limits (too short = not a real page)
 MAX_BODY_CHARS = 20_000
 MIN_BODY_CHARS = 40
 
 
 def normalise_url(url: str) -> str:
     """Scheme-less-safe, fragment-free, trailing-slash-normalised URL."""
+    # Add http:// if missing, lower-case the host, drop #fragment and trailing /
     if not re.match(r"^https?://", url):
         url = "http://" + url
     u = urlparse(url.strip())
@@ -42,10 +33,12 @@ def url_id(url: str) -> int:
 
 def read_page(html: str, url: str, fetched_at: float | None = None) -> dict | None:
     """Extract one post from a page. Returns None when there's no real text."""
+    # Parse the page and delete parts that are never content (scripts, menus, ...)
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(_DROP):
         tag.decompose()
 
+    # Title from <title>, else from <h1>
     title = ""
     if soup.title and soup.title.string:
         title = soup.title.string.strip()
@@ -55,16 +48,19 @@ def read_page(html: str, url: str, fetched_at: float | None = None) -> dict | No
 
     # Prefer the densest content container; fall back to the whole body.
     container = soup.find("main") or soup.find("article") or soup.body or soup
+    # Collect text from the smallest blocks (so nested blocks aren't counted twice)
     blocks = [
         b.get_text(" ", strip=True)
         for b in container.find_all(["p", "li", "pre", "td", "div", "h2", "h3"])
         if not b.find(["p", "li", "pre", "div"])  # leaf-ish blocks only, avoid duplicates
     ]
+    # Join the text and cap its length; too little text -> not a real page
     text = "\n".join(t for t in blocks if len(t) > 1) or container.get_text("\n", strip=True)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()[:MAX_BODY_CHARS]
     if len(text) < MIN_BODY_CHARS:
         return None
 
+    # Same post shape the scrapers produce, so the rest of the pipeline just works
     host = urlparse(normalise_url(url)).netloc
     pid = url_id(url)
     return {

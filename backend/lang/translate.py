@@ -1,32 +1,5 @@
-"""Offline translation of non-English post bodies into English.
-
-Built on `argostranslate` — open-source, fully offline neural MT (OPUS-MT
-models). No API key, no network at translate-time once the language package is
-installed. This keeps the project's "no paid API" rule intact while still
-giving the LLM and spaCy English text to work with.
-
-Why translate *before* extraction instead of relying on Mistral's native
-multilingual ability:
-  * spaCy's en_core_web_sm produces near-garbage NER on Cyrillic / CJK text.
-  * The curated MALWARE / THREAT_ACTOR keyword pass is English-only.
-  * Mistral 7B *can* read Russian, but its English summaries of Russian input
-    are noticeably weaker than its summaries of (translated) English input.
-Translating once, up front, lets every downstream stage stay monolingual.
-
-Model lifecycle:
-  * argostranslate packages are per-direction (ru->en, zh->en, …), ~100 MB
-    each, downloaded once and cached under the user's argos data dir.
-  * `_ensure_package(from_code)` installs the needed package on first use. If
-    the install fails (offline, no package for that language), translation
-    degrades gracefully: the original body is returned untranslated and the
-    result is flagged `ok=False`. The pipeline then runs extraction on the
-    original text — degraded, but never broken.
-
-IOC safety:
-  argostranslate occasionally mangles long alphanumeric tokens (hashes, BTC
-  addresses). It doesn't matter for *our* IOC extraction, because the extraction
-  step runs IOC regexes against the ORIGINAL body, not the translation — see
-  pipeline/run.py. The translation feeds NER + the LLM only.
+"""Offline translation of non-English posts to English (argostranslate).
+IOCs are extracted from the original text, so translation mistakes don't affect them.
 """
 
 from __future__ import annotations
@@ -36,32 +9,21 @@ from dataclasses import dataclass
 
 log = logging.getLogger("sentinelx.lang.translate")
 
-# Languages we proactively support. argostranslate can do more; this list just
-# controls which packages we *auto-install*. Anything outside it still gets a
-# best-effort attempt via _ensure_package.
+# Languages we auto-install translation models for
 SUPPORTED_SOURCE_LANGS = ("ru", "zh", "es", "fa", "de", "fr", "uk", "pt", "ar")
 
-# Translation is chunked: argostranslate handles long input but quality and
-# memory both improve with paragraph-sized chunks. The seed corpus tops out
-# around 2k chars so this rarely splits, but it's a safety belt for big posts.
+# Translate in chunks of this size (better quality, less memory)
 MAX_CHUNK_CHARS = 1500
 
-# In-process cache of which source languages we've already (tried to) install,
-# so a watch-mode loop doesn't re-probe the package index every batch.
+# Languages we already tried to install (don't retry every batch)
+# Languages whose model is installed and working
 _install_attempted: set[str] = set()
 _install_ok: set[str] = set()
 
 
 @dataclass(frozen=True)
 class TranslationResult:
-    """Outcome of translating one body.
-
-    text        English text — the translation, or the original on failure.
-    ok          True if a real translation happened; False if degraded
-                (no package / library missing / error) and `text` is the
-                untouched original.
-    source_lang The ISO code we translated from (echoed for the caller).
-    """
+    """Translation result: text (English or original), ok (translated?), source_lang."""
 
     text: str
     ok: bool
@@ -69,15 +31,13 @@ class TranslationResult:
 
 
 def _ensure_package(from_code: str) -> bool:
-    """Install the from_code->en argostranslate package if not already present.
-
-    Returns True if a usable package is available afterwards. Result is memoised
-    per language for the lifetime of the process.
-    """
+    """Install the <lang>->en model if missing; True if usable (cached per process)."""
+    # Already tried this language? Reuse the earlier answer
     if from_code in _install_attempted:
         return from_code in _install_ok
     _install_attempted.add(from_code)
 
+    # Translation library missing -> can't translate
     try:
         import argostranslate.package
         import argostranslate.translate
@@ -86,6 +46,7 @@ def _ensure_package(from_code: str) -> bool:
                     "(pip install argostranslate)")
         return False
 
+    # Model already on disk from an earlier run?
     # Already installed from a previous run?
     installed = argostranslate.translate.get_installed_languages()
     have_from = any(lg.code == from_code for lg in installed)
@@ -113,16 +74,19 @@ def _ensure_package(from_code: str) -> bool:
         log.warning("could not install %s->en package: %s", from_code, e)
         return False
 
+    # Remember it works so we skip these checks next time
     _install_ok.add(from_code)
     return True
 
 
 def _chunks(text: str, n: int = MAX_CHUNK_CHARS) -> list[str]:
     """Split text into <=n-char chunks, preferring paragraph boundaries."""
+    # Short text -> one chunk
     if len(text) <= n:
         return [text]
     out: list[str] = []
     buf = ""
+    # Build chunks paragraph by paragraph; start a new chunk when the current one would get too long
     for para in text.split("\n"):
         if len(buf) + len(para) + 1 > n and buf:
             out.append(buf)
@@ -138,20 +102,17 @@ def _chunks(text: str, n: int = MAX_CHUNK_CHARS) -> list[str]:
 
 
 def translate_to_english(text: str, source_lang: str) -> TranslationResult:
-    """Translate `text` from `source_lang` into English.
-
-    Never raises. If `source_lang` is already 'en' the original is returned with
-    ok=True (nothing to do). If translation can't be performed — missing
-    library, no language package, runtime error — the original text is returned
-    with ok=False so the caller can record the degradation and still proceed.
-    """
+    """Translate text to English; on failure returns the original with ok=False."""
+    # Nothing to translate (already English or empty)
     body = text or ""
     if source_lang == "en" or not body.strip():
         return TranslationResult(body, True, source_lang)
 
+    # No model for this language -> return the original text
     if not _ensure_package(source_lang):
         return TranslationResult(body, False, source_lang)
 
+    # Translate each chunk and join them back together
     try:
         import argostranslate.translate
 

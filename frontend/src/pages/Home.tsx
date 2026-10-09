@@ -17,11 +17,15 @@ const EvidenceGraph = lazy(() =>
   import("../components/EvidenceGraph").then((m) => ({ default: m.EvidenceGraph })),
 );
 
+// Number with thousands separators ("—" while loading)
 const fmt = (n: number | undefined) => (n === undefined ? "—" : n.toLocaleString());
 
+// Overview page: top finding, evidence graph, system status, latest posts, top techniques
 export function Home() {
   const { t } = useTranslation();
+  // Which post is open in the side panel (null = closed)
   const [openPost, setOpenPost] = useState<number | null>(null);
+  // Load dashboard numbers and service health (health refreshes every 15s)
   const stats = useQuery({ queryKey: ["stats"], queryFn: api.stats });
   const health = useQuery({
     queryKey: ["healthz", "full"],
@@ -31,6 +35,7 @@ export function Home() {
 
   return (
     <div className="mx-auto max-w-[1440px] px-4 pb-24 sm:px-8">
+      {/* 1. Headline finding */}
       {stats.isError ? (
         <div className="pt-10">
           <QueryError what="corpus statistics" error={stats.error} onRetry={() => stats.refetch()} />
@@ -39,10 +44,12 @@ export function Home() {
         <Finding stats={stats.data} onCite={setOpenPost} />
       )}
 
+      {/* 2. Graph of the evidence behind it */}
       {stats.data && stats.data.top_techniques[0] && (
         <EvidenceWeb techniqueId={stats.data.top_techniques[0].technique_id} onOpen={setOpenPost} />
       )}
 
+      {/* 3. Status of DB / LLM / Tor / queue */}
       <SectionDivider label={t("home.sectionStatus")} trailing={t("home.statusMeta")} />
       {health.isError ? (
         <QueryError what="system status" error={health.error} onRetry={() => health.refetch()} />
@@ -50,37 +57,39 @@ export function Home() {
         <StatusTable data={health.data} loading={health.isLoading} />
       )}
 
+      {/* 4. Latest posts */}
       <SectionDivider
         label={t("home.sectionFeed")}
         trailing={stats.data ? t("home.postsIndexed", { count: stats.data.posts_total }) : ""}
       />
       <LatestPosts onOpen={setOpenPost} />
 
+      {/* 5. Most common techniques */}
       <SectionDivider label={t("home.sectionMitre")} trailing={t("home.topTechniques")} />
       {stats.data && <TopTechniques data={stats.data.top_techniques} />}
 
+      {/* Side panel for whichever post is clicked */}
       <DetailPanel id={openPost} onClose={() => setOpenPost(null)} />
     </div>
   );
 }
 
-/* ----------------------------------------------------------------------- *
- * The opening: one real, cited finding — not a wall of counters.
- * Left: the claim, its provenance, and the posts that prove it.
- * Right: the chain of custody that produced it.
- * ----------------------------------------------------------------------- */
+/* Top finding: the claim + its source posts (left), how it was produced (right) */
 function Finding({ stats, onCite }: { stats: Stats | undefined; onCite: (id: number) => void }) {
   const { t } = useTranslation();
+  // The most common technique is the headline; load the posts behind it
   const top = stats?.top_techniques[0];
   const detail = useQuery({
     queryKey: ["technique", top?.technique_id],
     queryFn: () => api.technique(top!.technique_id),
     enabled: !!top,
   });
+  // Up to 8 unique post ids to show as evidence buttons
   const cited = [...new Set((detail.data?.posts ?? []).map((p) => p.raw_post_id))].slice(0, 8);
 
   return (
     <section className="grid gap-x-12 gap-y-10 pt-10 pb-4 lg:grid-cols-12 lg:pt-16">
+      {/* Left: headline, how it was found, evidence buttons */}
       <div className="lg:col-span-8">
         <h1 className="m-0 max-w-[18ch] text-4xl font-extrabold leading-[1.02] tracking-[-0.035em] sm:text-6xl">
           {top ? (
@@ -137,6 +146,7 @@ function Finding({ stats, onCite }: { stats: Stats | undefined; onCite: (id: num
         )}
       </div>
 
+      {/* Right: how many items passed each pipeline step */}
       <aside className="lg:col-span-4" aria-label={t("home.custodyTitle")}>
         <h2 className="m-0 text-sm font-bold">{t("home.custodyTitle")}</h2>
         <ol className="m-0 mt-3 list-none p-0">
@@ -162,17 +172,16 @@ function Finding({ stats, onCite }: { stats: Stats | undefined; onCite: (id: num
   );
 }
 
-/* ----------------------------------------------------------------------- *
- * System status. Only the database is fatal; the LLM and Tor being offline
- * means the console serves already-enriched data — said calmly, in amber.
- * ----------------------------------------------------------------------- */
+/* System status table (only DB down is fatal) */
 function StatusTable({ data, loading }: { data: HealthFull | undefined; loading: boolean }) {
   const { t } = useTranslation();
+  // One row per service; only the DB being down is fatal
   const rows: { key: string; label: string; fatal: boolean; offlineNote: string }[] = [
     { key: "db", label: t("home.svcDb"), fatal: true, offlineNote: t("home.svcDbDown") },
     { key: "ollama", label: t("home.svcLlm"), fatal: false, offlineNote: t("home.svcLlmOffline") },
     { key: "tor_socks", label: t("home.svcTor"), fatal: false, offlineNote: t("home.svcTorOffline") },
   ];
+  // Total posts still waiting in the pipeline
   const pipe = data?.checks.pipeline;
   const pending =
     Number(pipe?.pending_extraction ?? 0) + Number(pipe?.pending_llm ?? 0) + Number(pipe?.pending_mitre ?? 0);
@@ -183,6 +192,7 @@ function StatusTable({ data, loading }: { data: HealthFull | undefined; loading:
         {rows.map((r) => {
           const c = data?.checks[r.key];
           const up = c?.status === "up";
+          // Online / down (DB) / cached (LLM or Tor off) / checking
           const state = loading ? "checking" : up ? "online" : r.fatal ? "down" : "cached";
           return (
             <tr key={r.key} className="border-t border-border-soft align-baseline">
@@ -201,6 +211,7 @@ function StatusTable({ data, loading }: { data: HealthFull | undefined; loading:
             </tr>
           );
         })}
+        {/* Last row: pipeline queue */}
         <tr className="border-t border-border-soft align-baseline">
           <th scope="row" className="py-3 pr-4 text-left font-semibold">
             {t("home.svcQueue")}
@@ -222,8 +233,10 @@ function StatusTable({ data, loading }: { data: HealthFull | undefined; loading:
   );
 }
 
+// Coloured status word with a small shape in front of it
 function StatusWord({ state }: { state: "online" | "down" | "cached" | "checking" | "idle" | "busy" }) {
   const { t } = useTranslation();
+  // Text colour per state
   const style = {
     online: "text-ok",
     idle: "text-text",
@@ -232,8 +245,7 @@ function StatusWord({ state }: { state: "online" | "down" | "cached" | "checking
     down: "text-danger",
     checking: "text-text-muted",
   }[state];
-  // Shape differs per state (filled dot / ring / half / square), so status
-  // never rests on colour alone.
+  // Each state has its own shape, not just colour
   const mark = {
     online: "rounded-full bg-current",
     idle: "rounded-full border-2 border-current",
@@ -250,6 +262,7 @@ function StatusWord({ state }: { state: "online" | "down" | "cached" | "checking
   );
 }
 
+// Table of the 8 newest posts; click a row to open it
 function LatestPosts({ onOpen }: { onOpen: (id: number) => void }) {
   const { t } = useTranslation();
   const posts = useQuery({ queryKey: ["posts", { limit: 8 }], queryFn: () => api.posts({ limit: 8 }) });
@@ -307,9 +320,11 @@ function LatestPosts({ onOpen }: { onOpen: (id: number) => void }) {
   );
 }
 
+// Top 10 techniques with a bar showing how they were found
 function TopTechniques({ data }: { data: Stats["top_techniques"] }) {
   const { t } = useTranslation();
   if (!data.length) return <p className="text-sm text-text-muted">{t("common.noData")}</p>;
+  // Longest bar = most mentioned technique
   const max = Math.max(...data.map((d) => d.n));
   return (
     <>
@@ -339,14 +354,16 @@ function TopTechniques({ data }: { data: Stats["top_techniques"] }) {
   );
 }
 
-/* The featured finding as a picture: its evidence posts, the indicators they
- * share, and every technique they map to. Shared nodes = correlated evidence. */
+/* Mini graph of the top finding's posts, IOCs and techniques */
+// Graph of the top technique's posts (up to 18), their IOCs and techniques
 function EvidenceWeb({ techniqueId, onOpen }: { techniqueId: string; onOpen: (id: number) => void }) {
   const { t } = useTranslation();
   const detail = useQuery({ queryKey: ["technique", techniqueId], queryFn: () => api.technique(techniqueId) });
   const ids = [...new Set((detail.data?.posts ?? []).map((p) => p.raw_post_id))].slice(0, 18);
+  // Load every post's details in parallel
   const postsQ = useQueries({ queries: ids.map((id) => ({ queryKey: ["post", id], queryFn: () => api.post(id) })) });
   const posts = postsQ.map((q) => q.data).filter((p): p is PostDetail => !!p);
+  // Wait until all of them have loaded
   const ready = ids.length > 0 && postsQ.every((q) => !q.isLoading);
   return (
     <>

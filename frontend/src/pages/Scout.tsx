@@ -5,14 +5,7 @@ import { api, type ScrapeJob } from "../lib/api";
 import { SectionDivider } from "../components/Shell";
 import { QueryError } from "../components/Evidence";
 
-/* ----------------------------------------------------------------------- *
- * Scout — point SentinelX at an arbitrary darknet forum.
- *
- * Paste a .onion URL, hit RUN PIPELINE, and the backend scrapes it (HTML),
- * extracts IOCs, enriches with the local LLM, and maps it to MITRE ATT&CK —
- * all on demand, for a forum it has never seen before. The job runs in a
- * backend thread; this page polls its status and renders live progress.
- * ----------------------------------------------------------------------- */
+/* Scout page: paste a .onion URL, run the full pipeline, watch live progress */
 
 // The pipeline stages, in order — drives the progress checklist.
 const STAGES: { key: string; label: string }[] = [
@@ -30,8 +23,10 @@ function stageIndex(stage: string): number {
   return STAGES.findIndex((x) => x.key === s);
 }
 
+// Scout page
 export function Scout() {
   const qc = useQueryClient();
+  // Form inputs, the job being watched (can come from ?job= in the URL), and form error
   const [url, setUrl] = useState("");
   const [skipLlm, setSkipLlm] = useState(false);
   const [params] = useSearchParams();
@@ -40,6 +35,7 @@ export function Scout() {
   );
   const [formError, setFormError] = useState<string | null>(null);
 
+  // Recent jobs list
   const jobs = useQuery({ queryKey: ["scrape-jobs"], queryFn: api.scrapeJobs });
   // Shares the header pill's cache: warn before a run that Tor can't serve.
   const health = useQuery({ queryKey: ["healthz", "full"], queryFn: api.healthzFull });
@@ -55,6 +51,7 @@ export function Scout() {
     },
   });
 
+  // Start a job; on success, start watching it
   const start = useMutation({
     mutationFn: (body: { onion_url: string; skip_llm: boolean }) =>
       api.startScrapeJob(body),
@@ -66,6 +63,7 @@ export function Scout() {
     onError: (e: Error) => setFormError(e.message),
   });
 
+  // Check the address looks like .onion, then start the job
   function submit() {
     setFormError(null);
     const v = url.trim();
@@ -93,6 +91,7 @@ export function Scout() {
   }
 
 
+  // Warn in the form when Tor or Ollama is offline
   const torDown = health.data && health.data.checks.tor_socks?.status !== "up";
   const llmDown = health.data && health.data.checks.ollama?.status !== "up";
 
@@ -100,6 +99,7 @@ export function Scout() {
     <div className="mx-auto max-w-[1100px] px-4 pb-24 sm:px-8">
       <SectionDivider label="Scout" trailing="Run the full pipeline on any .onion forum" />
 
+      {/* Address form, warnings, and fast-mode option */}
       <form
         className="border border-text bg-surface-1 p-5"
         onSubmit={(e) => {
@@ -164,12 +164,14 @@ export function Scout() {
         </p>
       </form>
 
+      {/* Live progress of the selected job */}
       {active.data && (
         <div className="mt-6">
           <JobProgress job={active.data} />
         </div>
       )}
 
+      {/* Recent runs; click one to show its progress */}
       <section className="mt-10">
         <h3 className="m-0 mb-3 border-t-2 border-rule pt-2 text-sm font-bold">Recent runs</h3>
         {jobs.isError && <QueryError what="recent runs" error={jobs.error} onRetry={() => jobs.refetch()} />}
@@ -202,7 +204,9 @@ export function Scout() {
   );
 }
 
+// Progress checklist for one job
 function JobProgress({ job }: { job: ScrapeJob }) {
+  // Which stage the job is on, and whether it failed
   const current = stageIndex(job.stage);
   const failed = job.status === "error";
 
@@ -215,6 +219,7 @@ function JobProgress({ job }: { job: ScrapeJob }) {
       </div>
 
       <ol className="m-0 list-none space-y-2 p-0">
+        {/* Each stage is done, active, failed, or pending */}
         {STAGES.map((s, i) => {
           const state =
             failed && i === current
@@ -240,6 +245,7 @@ function JobProgress({ job }: { job: ScrapeJob }) {
               >
                 {s.label}
               </span>
+              {/* LLM stage extras: posts done so far, or "skipped" */}
               {s.key === "llm" && state === "active" && (
                 <span className="text-xs text-text-muted">
                   {job.posts_llm > 0 ? `${job.posts_llm} posts` : "starting…"}
@@ -253,6 +259,7 @@ function JobProgress({ job }: { job: ScrapeJob }) {
         })}
       </ol>
 
+      {/* Status message and error from the backend */}
       {job.message && (
         <p className="m-0 mt-4 border-t border-border-soft pt-3 text-sm text-text-muted">{job.message}</p>
       )}
@@ -262,6 +269,7 @@ function JobProgress({ job }: { job: ScrapeJob }) {
         </p>
       )}
 
+      {/* Final counts when finished */}
       {job.status === "done" && job.posts_scraped > 0 && (
         <dl className="m-0 mt-4 grid grid-cols-3 border-t border-border-soft pt-3 text-sm">
           <Stat n={job.posts_scraped} label="posts scraped" />
@@ -273,8 +281,7 @@ function JobProgress({ job }: { job: ScrapeJob }) {
   );
 }
 
-/** Stage marker drawn as a shape: done = filled square, active = ring that
- *  pulses (still under reduced motion), failed = red square, pending = hairline. */
+/** Stage icon: done = filled, active = pulsing ring, failed = red, pending = line. */
 function StageMark({ state }: { state: string }) {
   const cls =
     state === "done"
@@ -287,6 +294,7 @@ function StageMark({ state }: { state: string }) {
   return <span aria-hidden className={`inline-block h-3 w-3 flex-none ${cls}`} />;
 }
 
+// Coloured status word: Done / Failed / Running / Queued
 function StatusPill({ status }: { status: ScrapeJob["status"] }) {
   const color =
     status === "done" ? "text-ok" : status === "error" ? "text-danger" : "text-warn";
@@ -294,6 +302,7 @@ function StatusPill({ status }: { status: ScrapeJob["status"] }) {
   return <span className={`text-xs font-semibold ${color}`}>{label}</span>;
 }
 
+// One number with a label underneath
 function Stat({ n, label }: { n: number; label: string }) {
   return (
     <div>

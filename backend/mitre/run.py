@@ -1,30 +1,5 @@
-"""MITRE ATT&CK ingest + match pipeline entrypoint.
-
-Two operations driven by the same CLI:
-
-  --ingest          Download the official MITRE Enterprise ATT&CK corpus,
-                    parse it, embed every technique, and upsert into
-                    mitre_techniques. Idempotent; skips download if cached.
-
-  --once / --watch  For each post that has been LLM-analysed but not yet
-                    MITRE-matched: verify the LLM's candidate T-codes against
-                    the corpus, then run semantic top-k discovery against the
-                    full corpus. Persist matches into post_techniques.
-
-  --reset           Wipe post_techniques + mitre_runs + 'mitre' rows in
-                    post_processing_state. (Does NOT drop the corpus.)
-
-  --reset-corpus    Wipe mitre_techniques (forces re-ingest next run).
-
-Cursor:
-    Posts where post_processing_state has stage='llm' (LLM analysis done)
-    AND not yet present in post_processing_state for stage='mitre'.
-
-Usage:
-    python -m backend.mitre.run --ingest
-    python -m backend.mitre.run --once
-    python -m backend.mitre.run --once --limit 5
-    python -m backend.mitre.run --watch --interval 60
+"""MITRE stage: ingest ATT&CK data and map posts to techniques.
+Run: python -m backend.mitre.run --ingest | --once | --watch | --reset | --reset-corpus
 """
 
 from __future__ import annotations
@@ -42,6 +17,7 @@ from backend.mitre import embed as embed_mod
 from backend.mitre import ingest as ingest_mod
 from backend.mitre import match as match_mod
 
+# Name of this stage in post_processing_state
 STAGE = "mitre"
 log = logging.getLogger("sentinelx.mitre")
 
@@ -57,19 +33,20 @@ def _setup_logging(verbose: bool) -> None:
 # ---------- ingest ---------------------------------------------------------- #
 
 def ingest(store: Store, model_name: str, force_download: bool = False) -> int:
-    """Download (if needed), parse, embed, and upsert the MITRE corpus.
-    Returns count of techniques upserted.
-    """
+    """Download, parse, embed and save all MITRE techniques; returns count."""
     log.info("ingest: downloading + parsing MITRE Enterprise ATT&CK corpus")
+    # 1. Download + parse the MITRE file
     techniques = ingest_mod.fetch_and_parse(force_download=force_download)
     log.info("ingest: parsed %d techniques (incl. sub-techniques)", len(techniques))
 
     log.info("ingest: embedding (model=%s) -- this loads sentence-transformers, may take a few seconds...", model_name)
+    # 2. Turn each technique's name + description into a vector
     texts = [f"{t.name}. {t.description}" for t in techniques]
     t0 = time.time()
     vecs = embed_mod.encode(texts, model_name=model_name)
     log.info("ingest: embedded %d techniques in %.1fs", len(vecs), time.time() - t0)
 
+    # 3. Save every technique (insert new, update existing)
     now = time.time()
     conn = store.conn
     upserted = 0
@@ -113,13 +90,9 @@ def ingest(store: Store, model_name: str, force_download: bool = False) -> int:
 # ---------- mitigations ingest ---------------------------------------------- #
 
 def ingest_mitigations(store: Store) -> tuple[int, int]:
-    """Parse the cached MITRE corpus for course-of-action objects + their
-    'mitigates' links, and upsert into mitre_mitigations / technique_mitigations.
-
-    Embedding-free and offline — it only reads the already-cached STIX file, so
-    it runs in ~1s and is safe to re-run any time. Returns (mitigations, links).
-    """
+    """Load MITRE mitigations + technique links from cached data; returns (mitigations, links)."""
     log.info("ingest-mitigations: parsing course-of-action objects from cached corpus")
+    # Read mitigations and their technique links from the cached MITRE file
     mitigations, links = ingest_mod.parse_mitigations()
     log.info("ingest-mitigations: parsed %d mitigations, %d technique links",
              len(mitigations), len(links))
@@ -127,6 +100,7 @@ def ingest_mitigations(store: Store) -> tuple[int, int]:
     now = time.time()
     conn = store.conn
 
+    # Save each mitigation (insert new, update existing)
     for m in mitigations:
         conn.execute(
             """
@@ -141,11 +115,11 @@ def ingest_mitigations(store: Store) -> tuple[int, int]:
             (m.mitigation_id, m.name, m.description, m.url, now),
         )
 
-    # Known technique ids — drop any link whose technique isn't in the corpus
-    # so the FK into mitre_techniques always holds (defensive; parse already filters).
+    # Skip links to techniques we don't have
     known = {r[0] for r in conn.execute("SELECT technique_id FROM mitre_techniques")}
     linked = 0
     skipped = 0
+    # Save each technique <-> mitigation link
     for ln in links:
         if known and ln.technique_id not in known:
             skipped += 1
@@ -173,24 +147,15 @@ def ingest_mitigations(store: Store) -> tuple[int, int]:
 def _fetch_unmatched(
     conn: sqlite3.Connection, limit: int, include_llmless: bool = False
 ) -> list[sqlite3.Row]:
-    """Posts ready for MITRE matching but not yet matched.
-
-    Normally a post must have completed the LLM stage (so its LLM-claimed
-    T-codes can be verified). With `include_llmless=True`, posts that only
-    finished extraction (processed_at set, no LLM) are also returned — they
-    get pure semantic matching, no LLM verification. This is the path used
-    by a fast-mode pipeline job that skipped the LLM stage entirely.
-    """
+    """Posts ready for MITRE matching (include_llmless=True also takes posts with no LLM run)."""
+    # Normal: only posts the LLM already analysed. Fast mode: any extracted post
     gate = (
         "rp.processed_at IS NOT NULL"
         if include_llmless
         else "EXISTS (SELECT 1 FROM post_processing_state pps_llm "
              "WHERE pps_llm.raw_post_id = rp.id AND pps_llm.stage = 'llm')"
     )
-    # COALESCE(body_en, body): semantic matching embeds the post text against
-    # the ATT&CK corpus (English). For non-English posts the English
-    # translation lives in body_en — use it so the MiniLM cosine search isn't
-    # comparing Russian/Chinese text to English technique descriptions.
+    # Use the English translation for matching
     return conn.execute(
         f"""
         SELECT rp.id, COALESCE(rp.body_en, rp.body) AS body, la.techniques_json
@@ -213,6 +178,7 @@ def _persist_matches(
 ) -> tuple[int, int, int]:
     now = time.time()
     v = u = s = 0
+    # Save each match and count how it was found (v = verified, u = unverified, s = semantic)
     for m in matches:
         try:
             conn.execute(
@@ -232,6 +198,7 @@ def _persist_matches(
         except sqlite3.IntegrityError:
             # UNIQUE(raw_post_id, technique_id, source) - already had this match.
             pass
+    # Mark this post as done for the MITRE stage
     conn.execute(
         "INSERT OR REPLACE INTO post_processing_state (raw_post_id, stage, processed_at) "
         "VALUES (?, ?, ?)",
@@ -253,6 +220,7 @@ def process_batch(
 ) -> tuple[int, int, int, int]:
     """Process up to batch_size posts. Returns (seen, verified, unverified, semantic)."""
     conn = store.conn
+    # Log this run in mitre_runs
     started = time.time()
     cur = conn.execute("INSERT INTO mitre_runs (started_at) VALUES (?)", (started,))
     run_id = cur.lastrowid
@@ -261,13 +229,11 @@ def process_batch(
     seen = v_total = u_total = s_total = 0
     err: str | None = None
     try:
+        # Get the next posts to match
         rows = _fetch_unmatched(conn, batch_size, include_llmless=include_llmless)
         seen = len(rows)
         if rows:
-            # Chunk every post (MiniLM truncates at 256 word-pieces), then
-            # embed ALL chunks of the batch in one call -- sentence-transformers
-            # is much faster on a batch than one-at-a-time. `bounds` remembers
-            # which slice of the chunk matrix belongs to which post.
+            # Chunk all posts and embed in one batch (faster); `bounds` maps chunks back to posts
             chunks: list[str] = []
             bounds: list[tuple[int, int]] = []
             for r in rows:
@@ -280,9 +246,11 @@ def process_batch(
                       len(chunks), len(rows), time.time() - t0)
             post_vecs = [chunk_vecs[a:b] for a, b in bounds]
 
+            # For each post: check the LLM's T-codes, then find more by similarity
             for row, post_vec in zip(rows, post_vecs):
                 candidates = match_mod.parse_llm_candidates(row["techniques_json"])
                 llm_matches = match_mod.verify_llm(candidates, corpus_id_set)
+                # Skip techniques the LLM already got right, so they aren't counted twice
                 exclude = {m.technique_id for m in llm_matches if m.source == "llm_verified"}
                 sem_matches = match_mod.semantic_topk(
                     post_vec, corpus_matrix, corpus_ids,
@@ -297,6 +265,7 @@ def process_batch(
         err = repr(e)
         conn.commit()
         raise
+    # Always finish the mitre_runs log row
     finally:
         conn.execute(
             "UPDATE mitre_runs SET finished_at = ?, posts_seen = ?, "
@@ -312,6 +281,7 @@ def process_batch(
 def run_once(store: Store, model_name: str, batch: int, topk: int,
              threshold: float, limit: int | None,
              include_llmless: bool = False) -> None:
+    # Load all technique vectors once
     ids, matrix, id_set = match_mod.load_corpus(store.conn)
     if not ids:
         log.error("mitre_techniques is empty -- run with --ingest first")
@@ -319,6 +289,7 @@ def run_once(store: Store, model_name: str, batch: int, topk: int,
     log.info("loaded corpus: %d techniques", len(ids))
 
     total = 0
+    # Keep processing batches until no posts are left (or the limit is reached)
     while True:
         remaining = (limit - total) if limit is not None else batch
         if limit is not None and remaining <= 0:
@@ -336,6 +307,7 @@ def run_once(store: Store, model_name: str, batch: int, topk: int,
 def run_watch(store: Store, model_name: str, batch: int, topk: int,
               threshold: float, interval: float) -> None:
     log.info("watch mode: every %.1fs (Ctrl-C to stop)", interval)
+    # Repeat forever, waiting `interval` seconds between runs
     while True:
         try:
             run_once(store, model_name, batch, topk, threshold, limit=None)
@@ -344,6 +316,7 @@ def run_watch(store: Store, model_name: str, batch: int, topk: int,
         time.sleep(interval)
 
 
+# Delete all post -> technique matches (MITRE data itself stays)
 def reset_matches(store: Store) -> None:
     store.conn.executescript(
         "DELETE FROM post_techniques; DELETE FROM mitre_runs;"
@@ -353,6 +326,7 @@ def reset_matches(store: Store) -> None:
     store.conn.commit()
 
 
+# Delete the MITRE data itself (needs --ingest again)
 def reset_corpus(store: Store) -> None:
     store.conn.executescript(
         "DELETE FROM technique_mitigations; DELETE FROM mitre_mitigations;"
@@ -362,6 +336,7 @@ def reset_corpus(store: Store) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Command-line options
     p = argparse.ArgumentParser(prog="sentinelx-mitre")
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--ingest", action="store_true",
@@ -396,6 +371,7 @@ def main(argv: list[str] | None = None) -> int:
     _setup_logging(args.verbose)
 
     store = Store(args.db) if args.db else Store()
+    # Run whichever mode was picked
     try:
         if args.reset:
             reset_matches(store)

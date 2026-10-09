@@ -1,14 +1,4 @@
-"""Synthetic IOC test cases with ground truth BY CONSTRUCTION.
-
-Each case is built by filling a sentence template with known IOC values, so
-the expected answer is exact — no human labelling, no ambiguity. Cases mix:
-  * plain and defanged forms ([.], (.), hxxp, [at]),
-  * every supported IOC type,
-  * distractors that LOOK like IOCs but aren't (file names, library names,
-    version strings, invalid octets) — these measure precision,
-  * Monero (XMR) addresses, which SilkVault posts really use and which the
-    extractor does NOT support — these honestly measure a recall gap.
-"""
+"""Synthetic IOC test cases with known answers (plain, defanged, decoys, unsupported XMR)."""
 
 from __future__ import annotations
 
@@ -16,12 +6,14 @@ import random
 from dataclasses import dataclass, field
 
 
+# One test sentence and the IOCs it really contains
 @dataclass
 class Case:
     text: str
     expected: set[tuple[str, str]] = field(default_factory=set)   # (type, value)
 
 
+# Known IOC values used to build the test sentences
 IPS = ["185.220.101.45", "45.61.184.220", "194.165.16.38", "23.94.215.6", "91.219.236.18"]
 DOMAINS = ["secure-update.xyz", "okta-sso.help", "fast-paste.su", "acmecorp-vpn.online",
            "files.example.co.uk"]
@@ -41,22 +33,24 @@ DISTRACTORS = [
     "octets like 999.10.10.10 are not addresses",
     "the readme.md explains it",
 ]
-# A real, known false-positive class we deliberately leave in the set: a
-# four-part version string is indistinguishable from an IPv4 by syntax.
+# Known false positive kept on purpose: version strings look like IPv4
 VERSION_FP = "patched in build 4.2.1.7"
 
 
+# Defang the first dot: 1.2.3.4 -> 1[.]2.3.4
 def _defang(v: str) -> str:
     return v.replace(".", "[.]", 1)
 
 
 def build_cases(n: int = 80, seed: int = 1337) -> list[Case]:
+    # Fixed seed so the same cases are built every time
     rng = random.Random(seed)
     cases: list[Case] = []
     for i in range(n):
         parts: list[str] = []
         exp: set[tuple[str, str]] = set()
 
+        # Every case gets an IP and a domain (sometimes defanged)
         ip = rng.choice(IPS)
         parts.append(f"C2 at {_defang(ip) if rng.random() < 0.5 else ip}")
         exp.add(("ipv4", ip))
@@ -65,6 +59,7 @@ def build_cases(n: int = 80, seed: int = 1337) -> list[Case]:
         parts.append(f"landing on {_defang(d) if rng.random() < 0.5 else d}")
         exp.add(("domain", d))
 
+        # Other IOC types are added randomly
         if rng.random() < 0.6:
             c = rng.choice(CVES)
             parts.append(f"entry via {c.lower() if rng.random() < 0.3 else c}")
@@ -93,11 +88,13 @@ def build_cases(n: int = 80, seed: int = 1337) -> list[Case]:
             x = rng.choice(XMR)
             parts.append(f"or XMR {x}")
             exp.add(("xmr", x))          # unsupported type -> counts as a miss
+        # Sometimes add a decoy, and every 10th case gets the version-string trap
         if rng.random() < 0.5:
             parts.append(rng.choice(DISTRACTORS))
         if i % 10 == 0:
             parts.append(VERSION_FP)     # expected: nothing
 
+        # Shuffle the parts and join them into one sentence
         rng.shuffle(parts)
         cases.append(Case(". ".join(parts) + ".", exp))
     return cases

@@ -1,5 +1,4 @@
-/* Renders text containing [#NNN] post citations, where each citation becomes
- * a clickable button that surfaces the post via the shared DetailPanel. */
+/* Text where each [#NNN] becomes a button that opens that post */
 
 const CITE = /\[#(\d+)\]/g;
 
@@ -10,6 +9,7 @@ export function CitationText({
   text: string;
   onSelect: (postId: number) => void;
 }) {
+  // Split the text into plain pieces and citation pieces
   const parts: (string | { id: number; raw: string })[] = [];
   let last = 0;
   for (const m of text.matchAll(CITE)) {
@@ -22,6 +22,7 @@ export function CitationText({
 
   return (
     <>
+      {/* Plain text stays text; citations become clickable buttons */}
       {parts.map((p, i) =>
         typeof p === "string" ? (
           <span key={i}>{p}</span>

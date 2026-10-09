@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 DEMO_DB = Path(__file__).resolve().parents[1] / "backend" / "db" / "sentinelx.db"
 
 
+# Test API client backed by a temporary DB (env vars can turn on the API key / rate limit)
 def make_client(tmp_path, monkeypatch, **env) -> TestClient:
     db = tmp_path / "api.db"
     shutil.copy(DEMO_DB, db)
@@ -21,6 +22,7 @@ def make_client(tmp_path, monkeypatch, **env) -> TestClient:
     return TestClient(main.app)
 
 
+# Default client used by most tests
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.delenv("SENTINELX_API_KEY", raising=False)

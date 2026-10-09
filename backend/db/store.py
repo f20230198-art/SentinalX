@@ -1,9 +1,4 @@
-"""SQLite-backed store for raw scraped posts and scraper run metadata.
-
-Single connection per Store instance. The scraper is a single writer so we
-don't need WAL or per-thread connections; we do enable foreign keys for
-consistency with the forum schema.
-"""
+"""SQLite store: saves scraped posts and scraper run logs."""
 
 from __future__ import annotations
 
@@ -13,30 +8,32 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable, Iterator
 
+# Paths for the schema file and the database file
 HERE = Path(__file__).parent.resolve()
 SCHEMA_PATH = HERE / "schema.sql"
 
 DEFAULT_DB_PATH = HERE / "sentinelx.db"
 
 
+# Wrapper around the SQLite database used by the scraper and pipeline stages
 class Store:
     def __init__(self, db_path: str | Path = DEFAULT_DB_PATH) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        # Open the DB; rows act like dicts (row["body"])
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
-        # busy_timeout: when a pipeline job (this Store) writes while the API
-        # reads on its own connection, wait for the lock instead of failing.
+        # Wait for locks instead of failing when the API and a job use the DB together
         self.conn.execute("PRAGMA busy_timeout = 5000")
+        # Create any missing tables/columns
         self._init_schema()
 
     def _init_schema(self) -> None:
+        # Create all tables from schema.sql (skips ones that exist)
         with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
             self.conn.executescript(f.read())
-        # Idempotent column adds for DBs created before later features landed.
-        # SQLite has no IF NOT EXISTS for ADD COLUMN, so check PRAGMA table_info
-        # first and skip columns that already exist.
+        # Add newer columns to old DBs (skip ones that already exist)
         cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(raw_posts)")}
         if "processed_at" not in cols:
             self.conn.execute("ALTER TABLE raw_posts ADD COLUMN processed_at REAL")
@@ -48,14 +45,14 @@ class Store:
             self.conn.execute(
                 "ALTER TABLE raw_posts ADD COLUMN source TEXT NOT NULL DEFAULT 'darkbay'"
             )
-        # Multilingual columns. Left NULL until the extraction step backfills
-        # them (a --reset re-extract will populate every row).
+        # Language columns (filled in by the extraction step)
         if "lang" not in cols:
             self.conn.execute("ALTER TABLE raw_posts ADD COLUMN lang TEXT")
         if "lang_confidence" not in cols:
             self.conn.execute("ALTER TABLE raw_posts ADD COLUMN lang_confidence REAL")
         if "body_en" not in cols:
             self.conn.execute("ALTER TABLE raw_posts ADD COLUMN body_en TEXT")
+        # Run upgrades, then make sure the indexes exist
         self._migrate_composite_post_key()
         self._ensure_search_index()
         self.conn.execute(
@@ -70,21 +67,14 @@ class Store:
         self.conn.commit()
 
     def _migrate_composite_post_key(self) -> None:
-        """Rebuild raw_posts if it still has the old global UNIQUE(source_post_id).
-
-        Older DBs made source_post_id unique across ALL forums, which forced the
-        HTML scraper to offset ids into per-forum blocks to avoid collisions.
-        The real identity of a post is (source, source_post_id). SQLite can't
-        drop a column constraint in place, so we follow its documented
-        table-rebuild procedure: create the new table, copy, drop, rename —
-        with foreign keys off so child rows (iocs, entities, …) are untouched.
-        Row ids are preserved, so every FK still points at the same post.
-        """
+        """Migrate old DBs: make posts unique per (source, post id) instead of globally."""
+        # Already migrated? Nothing to do
         sql = self.conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='raw_posts'"
         ).fetchone()["sql"]
         if "UNIQUE(source, source_post_id)" in sql.replace("\n", " "):
             return
+        # Rebuild the table with the new rule: create new, copy rows, drop old, rename
         cols = [r["name"] for r in self.conn.execute("PRAGMA table_info(raw_posts)")]
         col_list = ", ".join(cols)
         self.conn.commit()
@@ -121,13 +111,8 @@ class Store:
             self.conn.execute("PRAGMA foreign_keys = ON")
 
     def _ensure_search_index(self) -> None:
-        """Full-text index (FTS5) over post titles and bodies, for discovery.
-
-        External-content table: the text lives in raw_posts; posts_fts stores
-        only the index. Triggers keep it in sync on every insert/update/delete.
-        Created here (not in schema.sql) because the composite-key migration
-        rebuilds raw_posts, which drops any triggers attached to it.
-        """
+        """Full-text search index on post titles/bodies, kept in sync by triggers."""
+        # The search index + triggers that update it on insert/delete/update
         self.conn.executescript("""
             CREATE VIRTUAL TABLE IF NOT EXISTS posts_fts USING fts5(
                 thread_title, body, body_en,
@@ -149,6 +134,7 @@ class Store:
                 VALUES (new.id, new.thread_title, new.body, new.body_en);
             END;
         """)
+        # If the index is missing posts, rebuild it
         indexed = self.conn.execute("SELECT COUNT(*) FROM posts_fts_docsize").fetchone()[0]
         total = self.conn.execute("SELECT COUNT(*) FROM raw_posts").fetchone()[0]
         if indexed != total:
@@ -161,15 +147,7 @@ class Store:
     # --- cursor ----------------------------------------------------------- #
 
     def get_cursor(self, source: str | None = None) -> float:
-        """Return MAX(source_created_at) over raw_posts, or 0.0 if empty.
-
-        Using MAX over the data instead of a separate state row means the cursor
-        cannot drift out of sync with what's actually stored.
-
-        With `source`, the cursor is scoped to one forum — so re-scraping
-        SilkVault doesn't get held back by DarkBay's (or another forum's)
-        newer posts. Without it, the cursor is global (original behaviour).
-        """
+        """Latest post timestamp (optionally for one forum), or 0.0 if empty."""
         if source is not None:
             row = self.conn.execute(
                 "SELECT COALESCE(MAX(source_created_at), 0.0) AS c "
@@ -193,19 +171,12 @@ class Store:
     # --- inserts ---------------------------------------------------------- #
 
     def insert_posts(self, posts: Iterable[dict], source: str = "darkbay") -> tuple[int, int]:
-        """Insert posts, ignoring duplicates by (source, source_post_id).
-
-        `source` records which forum the batch came from — 'darkbay' for the
-        original JSON-API forum, or an .onion host / label for posts pulled by
-        the generic HTML scraper. A per-post 'source' key overrides the
-        batch default if present.
-
-        Returns (inserted, duplicates).
-        """
+        """Insert posts, skipping duplicates; returns (inserted, duplicates)."""
         inserted = 0
         duplicates = 0
         fetched_at = time.time()
 
+        # Insert each post; a duplicate raises IntegrityError and is counted instead
         for p in posts:
             try:
                 self.conn.execute(
@@ -238,6 +209,7 @@ class Store:
 
     # --- run log ---------------------------------------------------------- #
 
+    # Context manager: logs a scraper run start, then records results (or the error) at the end
     @contextmanager
     def run(self, cursor_before: float) -> Iterator["RunHandle"]:
         started = time.time()
@@ -259,10 +231,12 @@ class Store:
 
     # --- diagnostics ------------------------------------------------------ #
 
+    # Total number of posts stored
     def count_posts(self) -> int:
         return int(self.conn.execute("SELECT COUNT(*) AS n FROM raw_posts").fetchone()["n"])
 
 
+# Holds the counts for one scraper run and writes them to scraper_runs
 class RunHandle:
     def __init__(self, conn: sqlite3.Connection, run_id: int) -> None:
         self.conn = conn
@@ -274,6 +248,7 @@ class RunHandle:
         self.error: str | None = None
         self._finalized = False
 
+    # Write the final counts to the run's row (only once)
     def finalize(self) -> None:
         if self._finalized:
             return

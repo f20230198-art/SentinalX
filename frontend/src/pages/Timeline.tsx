@@ -6,21 +6,11 @@ import { DetailPanel } from "../components/DetailPanel";
 import { ProvenanceMark } from "../components/Evidence";
 import { intentColor, PROVENANCE, type Provenance } from "../lib/palette";
 
-/* ----------------------------------------------------------------------- *
- * Posts register — every ingested post, newest first, grouped by day.
- *
- * Data: one SSE stream (/events?since_id=0). The server replays history,
- * then keeps the connection open and pushes new posts as they're ingested;
- * EventSource reconnects on its own and resumes via Last-Event-ID. Anything
- * that arrives after the initial replay settles is marked as a live arrival.
- *
- * Layout: a ruled register (id · time · thread · intent · techniques · IOCs)
- * instead of a decorative spine — scannable, sortable by eye, and every row
- * opens the post's evidence in the detail panel.
- * ----------------------------------------------------------------------- */
+/* Posts page: every post newest first, grouped by day; live updates via SSE (/events) */
 
 type Filter = "all" | "sale" | "discussion" | "doxxing" | "recruitment" | "with_cve" | "with_btc";
 
+// Filter buttons above the list
 const FILTERS: { key: Filter; label: string }[] = [
   { key: "all", label: "All" },
   { key: "sale", label: "Sale" },
@@ -31,6 +21,7 @@ const FILTERS: { key: Filter; label: string }[] = [
   { key: "with_btc", label: "Has a BTC address" },
 ];
 
+// Does a post match the chosen filter button?
 function passesFilter(p: TimelinePost, f: Filter): boolean {
   if (f === "all") return true;
   if (f === "with_cve") return p.iocs.some((i) => i.ioc_type === "cve");
@@ -38,6 +29,7 @@ function passesFilter(p: TimelinePost, f: Filter): boolean {
   return p.intent === f;
 }
 
+// Date helpers: "2026-01-31", "14:05", "Sat, Jan 31, 2026"
 const dayKey = (t: number) => new Date(t * 1000).toISOString().slice(0, 10);
 const timeLabel = (t: number) => new Date(t * 1000).toISOString().slice(11, 16);
 function dayLabel(key: string): string {
@@ -50,14 +42,14 @@ function dayLabel(key: string): string {
   });
 }
 
+// How long a new post stays highlighted, and how long to wait before history counts as loaded
 const ARRIVAL_MS = 4500;
 const SETTLE_MS = 2500;
 
-// Posts received so far, kept at module level so they survive navigating away
-// and back: a return visit renders instantly and resumes the stream after the
-// newest id it has, instead of replaying the whole history again.
+// Cache posts across page visits so returning is instant
 const cache = { posts: new Map<number, TimelinePost>(), lastId: 0, historyDone: false };
 
+// Posts page
 export function Timeline() {
   const [selected, setSelected] = useState<number | null>(null);
   // Filters live in the URL: views are shareable and survive a refresh.
@@ -73,17 +65,22 @@ export function Timeline() {
       return next;
     }, { replace: true });
   const setFilter = (f: Filter) => setParam({ f: f === "all" ? null : f });
+  // Highlighted row for keyboard navigation (j/k)
   const [cursor, setCursor] = useState(0);
   const searchRef = useRef<HTMLInputElement | null>(null);
+  // All posts received so far, and whether the old ones have finished loading
   const [posts, setPosts] = useState<Map<number, TimelinePost>>(cache.posts);
   const [historyDone, setHistoryDone] = useState(cache.historyDone);
+  // Posts that just arrived live (shown highlighted)
   const [arriving, setArriving] = useState<Set<number>>(new Set());
   const [connected, setConnected] = useState(true);
   const historyDoneRef = useRef(cache.historyDone);
 
+  // Open the live stream; the server sends old posts first, then new ones as they come in
   useEffect(() => {
     const es = new EventSource(`${API_BASE}/events?since_id=${cache.lastId}`);
     let settle: number | undefined;
+    // When no post has arrived for a moment, treat history as fully loaded
     const scheduleSettle = () => {
       window.clearTimeout(settle);
       settle = window.setTimeout(() => {
@@ -94,6 +91,7 @@ export function Timeline() {
     };
     if (!cache.historyDone) scheduleSettle(); // an empty corpus still settles
 
+    // Each incoming post: add it to the list (skip duplicates)
     const onPost = (ev: MessageEvent) => {
       let p: TimelinePost & { missing?: boolean };
       try {
@@ -109,6 +107,7 @@ export function Timeline() {
         cache.posts = next;
         return next;
       });
+      // After history: briefly highlight the new post
       if (historyDoneRef.current) {
         setArriving((prev) => new Set(prev).add(p.id));
         window.setTimeout(
@@ -123,6 +122,7 @@ export function Timeline() {
         scheduleSettle();
       }
     };
+    // Track connection status (the browser reconnects on its own)
     es.addEventListener("post", onPost);
     es.onopen = () => setConnected(true);
     es.onerror = () => setConnected(es.readyState === EventSource.OPEN);
@@ -132,19 +132,20 @@ export function Timeline() {
     };
   }, []);
 
+  // All posts, newest first
   const all = useMemo(
     () => [...posts.values()].sort((a, b) => b.source_created_at - a.source_created_at),
     [posts],
   );
 
+  // How many posts each filter button would show
   const counts = useMemo(() => {
     const c = Object.fromEntries(FILTERS.map((f) => [f.key, 0])) as Record<Filter, number>;
     for (const p of all) for (const f of FILTERS) if (passesFilter(p, f.key)) c[f.key]++;
     return c;
   }, [all]);
 
-  // Everything except the date range: feeds the activity chart, so the chart
-  // always shows where the matches are in time.
+  // All filters except dates (feeds the activity chart)
   const matching = useMemo(() => {
     const needle = q.trim().toLowerCase();
     return all.filter(
@@ -159,6 +160,7 @@ export function Timeline() {
     );
   }, [all, filter, q]);
 
+  // Then apply the date range picked on the chart
   const visible = useMemo(
     () =>
       matching.filter((p) => {
@@ -190,11 +192,13 @@ export function Timeline() {
   }, [visible, cursor, selected]);
   useEffect(() => setCursor(0), [filter, q, from, to]);
   const cursorId = visible[cursor]?.id;
+  // Keep the highlighted row scrolled into view
   useEffect(() => {
     if (cursorId !== undefined)
       document.getElementById(`post-row-${cursorId}`)?.scrollIntoView({ block: "nearest" });
   }, [cursorId]);
 
+  // Group visible posts by day
   const days = useMemo(() => {
     const m = new Map<string, TimelinePost[]>();
     for (const p of visible) {
@@ -212,6 +216,7 @@ export function Timeline() {
         trailing={historyDone ? `${all.length} posts` : `Loading ${all.length} posts…`}
       />
 
+      {/* Filter buttons + live status */}
       <div className="mb-6 flex flex-wrap items-center gap-x-6 gap-y-3">
         <div role="group" aria-label="Filter posts" className="flex flex-wrap gap-1.5">
           {FILTERS.map((f) => (
@@ -247,6 +252,7 @@ export function Timeline() {
         </span>
       </div>
 
+      {/* Search box */}
       <div className="mb-6 flex flex-wrap items-center gap-3">
         <label className="relative min-w-[260px] flex-1">
           <span className="sr-only">Search posts</span>
@@ -265,6 +271,7 @@ export function Timeline() {
         </span>
       </div>
 
+      {/* Posts-per-day chart */}
       {historyDone && matching.length > 0 && (
         <ActivityChart
           posts={matching}
@@ -274,6 +281,7 @@ export function Timeline() {
         />
       )}
 
+      {/* Legend for the technique marks */}
       <div className="mb-4 flex flex-wrap gap-x-5 gap-y-1 text-xs text-text-muted">
         {(Object.keys(PROVENANCE) as Provenance[]).map((k) => (
           <span key={k} className="inline-flex items-center gap-1.5" title={PROVENANCE[k].description}>
@@ -282,6 +290,7 @@ export function Timeline() {
         ))}
       </div>
 
+      {/* Loading / empty states */}
       {all.length === 0 && !historyDone && <p className="py-16 text-sm text-text-muted">Loading the register…</p>}
       {historyDone && days.length === 0 && (
         <p className="border-t border-border-soft py-8 text-sm text-text-muted">
@@ -294,6 +303,7 @@ export function Timeline() {
         </p>
       )}
 
+      {/* The posts table, one block per day */}
       <div className="overflow-x-auto">
         <table className="w-full min-w-[880px] border-collapse text-sm">
           <thead className="sr-only">
@@ -328,6 +338,7 @@ export function Timeline() {
   );
 }
 
+// One row: id, time, title, intent, first 4 techniques, IOC count
 function PostRow({
   post,
   arriving,
@@ -402,11 +413,7 @@ function PostRow({
   );
 }
 
-/* ----------------------------------------------------------------------- *
- * Activity over time. One bar per day: sales (the signal) stacked under
- * everything else. Drag across the chart to keep a date range; click a bar for
- * one day; the selection writes ?from=&to= into the URL.
- * ----------------------------------------------------------------------- */
+/* Posts-per-day chart; drag or click to filter by date (saved in URL) */
 function ActivityChart({
   posts,
   from,
@@ -418,6 +425,7 @@ function ActivityChart({
   to: string | null;
   onRange: (from: string | null, to: string | null) => void;
 }) {
+  // Count posts per day, split into "sale" and everything else
   const bars = useMemo(() => {
     const m = new Map<string, { sale: number; other: number }>();
     for (const p of posts) {
@@ -437,18 +445,22 @@ function ActivityChart({
     return out;
   }, [posts]);
 
+  // Chart size and bar width
   const W = 1200, H = 120, PAD = 18;
   const max = Math.max(1, ...bars.map((b) => b.sale + b.other));
   const bw = (W - PAD * 2) / Math.max(1, bars.length);
   const svgRef = useRef<SVGSVGElement | null>(null);
+  // Start/end bar of the current drag
   const [dragFrom, setDragFrom] = useState<number | null>(null);
   const [dragTo, setDragTo] = useState<number | null>(null);
 
+  // Which bar is under the mouse
   const idxAt = (clientX: number) => {
     const r = svgRef.current!.getBoundingClientRect();
     const x = ((clientX - r.left) / r.width) * W;
     return Math.max(0, Math.min(bars.length - 1, Math.floor((x - PAD) / bw)));
   };
+  // Is bar i inside the selected range?
   const inSel = (i: number) => {
     if (dragFrom !== null && dragTo !== null) return i >= Math.min(dragFrom, dragTo) && i <= Math.max(dragFrom, dragTo);
     const d = bars[i].day;
@@ -484,6 +496,7 @@ function ActivityChart({
         preserveAspectRatio="none"
         role="img"
         aria-label={`Posts per day, ${bars.length} days`}
+        // Drag across bars to pick a date range
         onPointerDown={(e) => {
           (e.target as Element).setPointerCapture?.(e.pointerId);
           const i = idxAt(e.clientX);
@@ -499,6 +512,7 @@ function ActivityChart({
           setDragTo(null);
         }}
       >
+        {/* One stacked bar per day: sale (accent) under other intents */}
         {bars.map((b, i) => {
           const x = PAD + i * bw;
           const hOther = ((H - 8) * b.other) / max;

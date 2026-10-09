@@ -1,18 +1,9 @@
--- SentinelX backend store. Stages 2+ write here.
---
--- raw_posts: every post the scraper pulls from the forum, deduplicated by
---            source_post_id. We keep the source's epoch timestamp verbatim so
---            the scraper can use MAX(source_created_at) as its incremental
---            cursor without a separate state table.
---
--- scraper_runs: one row per scraper invocation. Useful for debugging "did the
---               last poll see anything new?" and for observability later.
+-- SentinelX database. raw_posts = scraped posts; scraper_runs = one log row per scrape.
 
+-- Every scraped post, exactly as it was on the forum
 CREATE TABLE IF NOT EXISTS raw_posts (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    -- Unique per FORUM, not globally: each forum numbers its posts from 1, so
-    -- the identity of a post is (source, source_post_id). See the UNIQUE
-    -- constraint at the bottom of this table.
+    -- Post id from the forum (unique per forum, not globally)
     source_post_id      INTEGER NOT NULL,
     source_thread_id    INTEGER NOT NULL,
     thread_title        TEXT    NOT NULL,
@@ -21,15 +12,9 @@ CREATE TABLE IF NOT EXISTS raw_posts (
     body                TEXT    NOT NULL,
     source_created_at   REAL    NOT NULL,
     fetched_at          REAL    NOT NULL,
-    -- Which forum this post came from. 'darkbay' for the original JSON-API
-    -- forum; an .onion host (or a label) for posts pulled by the generic HTML
-    -- scraper. Defaults to 'darkbay' for any pre-existing rows on migration.
+    -- Which forum the post came from
     source              TEXT    NOT NULL DEFAULT 'darkbay',
-    -- Multilingual ingestion. Detected ISO 639-1 language of `body`
-    -- ('en','ru','zh',…) or 'unknown' when undetectable. body_en holds the
-    -- English translation when lang != 'en'; it is NULL for English posts (no
-    -- translation needed). lang_confidence is langdetect's 0..1 probability.
-    -- All three are filled by the extraction step before IOC/NER run.
+    -- Detected language, its confidence, and English translation (NULL if already English)
     lang                TEXT,
     lang_confidence     REAL,
     body_en             TEXT,
@@ -37,10 +22,12 @@ CREATE TABLE IF NOT EXISTS raw_posts (
     UNIQUE(source, source_post_id)
 );
 
+-- Indexes = faster lookups by time, thread and category
 CREATE INDEX IF NOT EXISTS idx_raw_posts_source_created ON raw_posts(source_created_at);
 CREATE INDEX IF NOT EXISTS idx_raw_posts_thread         ON raw_posts(source_thread_id);
 CREATE INDEX IF NOT EXISTS idx_raw_posts_category       ON raw_posts(category);
 
+-- One row per scraper run: when, cursor before/after, and counts
 CREATE TABLE IF NOT EXISTS scraper_runs (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at      REAL    NOT NULL,
@@ -53,17 +40,9 @@ CREATE TABLE IF NOT EXISTS scraper_runs (
     error           TEXT
 );
 
--- Extraction layer.
---
--- iocs: one row per (post, type, value). Indicators of Compromise pulled out
---       of post bodies via regex over a defanged-then-normalised copy of the
---       text. Re-extracting the same post is idempotent (UNIQUE constraint).
---
--- entities: one row per (post, label, text). Named entities from spaCy's
---           en_core_web_sm plus a curated malware/threat-actor pass.
---
--- extraction_runs: audit log, mirrors scraper_runs.
+-- Extraction: iocs + entities found in each post, extraction_runs = run log.
 
+-- IOCs found in each post (IPs, hashes, CVEs, wallets, ...)
 CREATE TABLE IF NOT EXISTS iocs (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     raw_post_id     INTEGER NOT NULL,
@@ -80,6 +59,7 @@ CREATE INDEX IF NOT EXISTS idx_iocs_post ON iocs(raw_post_id);
 CREATE INDEX IF NOT EXISTS idx_iocs_type ON iocs(ioc_type);
 CREATE INDEX IF NOT EXISTS idx_iocs_value ON iocs(value);
 
+-- Named entities found in each post (orgs, people, malware, actors, ...)
 CREATE TABLE IF NOT EXISTS entities (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     raw_post_id     INTEGER NOT NULL,
@@ -95,6 +75,7 @@ CREATE TABLE IF NOT EXISTS entities (
 CREATE INDEX IF NOT EXISTS idx_entities_post  ON entities(raw_post_id);
 CREATE INDEX IF NOT EXISTS idx_entities_label ON entities(label);
 
+-- One row per extraction run
 CREATE TABLE IF NOT EXISTS extraction_runs (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at      REAL    NOT NULL,
@@ -105,18 +86,9 @@ CREATE TABLE IF NOT EXISTS extraction_runs (
     error           TEXT
 );
 
--- Local LLM (Mistral via Ollama) analyses.
---
--- llm_analyses: one row per raw_post. Holds the four sub-stage outputs of the
---               prompt chain — summary, intent, targets, techniques — plus the
---               raw JSON of each LLM response for debugging / reproducibility.
---
--- post_processing_state: per-stage cursor table. Keyed by (raw_post_id, stage)
---                        so each enrichment step (llm, mitre, …) can track its
---                        own progress without piling more columns onto raw_posts.
---
--- llm_runs: audit log mirroring scraper_runs / extraction_runs.
+-- LLM analysis: llm_analyses = per-post results, post_processing_state = which stage each post finished, llm_runs = run log.
 
+-- LLM results per post: summary, intent, targets, suggested techniques
 CREATE TABLE IF NOT EXISTS llm_analyses (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     raw_post_id     INTEGER NOT NULL UNIQUE,
@@ -133,6 +105,7 @@ CREATE TABLE IF NOT EXISTS llm_analyses (
 CREATE INDEX IF NOT EXISTS idx_llm_analyses_post   ON llm_analyses(raw_post_id);
 CREATE INDEX IF NOT EXISTS idx_llm_analyses_intent ON llm_analyses(intent);
 
+-- Which pipeline stages ('llm', 'mitre') each post has finished
 CREATE TABLE IF NOT EXISTS post_processing_state (
     raw_post_id     INTEGER NOT NULL,
     stage           TEXT    NOT NULL,
@@ -143,6 +116,7 @@ CREATE TABLE IF NOT EXISTS post_processing_state (
 
 CREATE INDEX IF NOT EXISTS idx_pps_stage ON post_processing_state(stage);
 
+-- One row per LLM run
 CREATE TABLE IF NOT EXISTS llm_runs (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at      REAL    NOT NULL,
@@ -154,20 +128,9 @@ CREATE TABLE IF NOT EXISTS llm_runs (
     error           TEXT
 );
 
--- MITRE ATT&CK ingest + vector index.
---
--- mitre_techniques: one row per Enterprise ATT&CK technique (and sub-technique).
---                   Embedding is stored as a raw float32 BLOB so we can mmap-load
---                   the whole matrix for cosine search without per-row JSON parse.
---
--- post_techniques: one row per (raw_post_id, technique_id, source). source is
---                  'llm_verified'   - LLM emitted this T-code AND it exists in corpus
---                  'llm_unverified' - LLM emitted this T-code but it's not in corpus
---                  'semantic'       - cosine search surfaced it; LLM didn't mention it
---                  Idempotent re-runs via UNIQUE(raw_post_id, technique_id, source).
---
--- mitre_runs: audit log mirroring scraper_runs / extraction_runs / llm_runs.
+-- MITRE: mitre_techniques (with embeddings), post_techniques (source = llm_verified | llm_unverified | semantic), mitre_runs = run log.
 
+-- The official MITRE technique list, each with its embedding vector
 CREATE TABLE IF NOT EXISTS mitre_techniques (
     technique_id    TEXT    PRIMARY KEY,
     name            TEXT    NOT NULL,
@@ -183,6 +146,7 @@ CREATE TABLE IF NOT EXISTS mitre_techniques (
 
 CREATE INDEX IF NOT EXISTS idx_mitre_parent ON mitre_techniques(parent_id);
 
+-- Which techniques each post was matched to, and how (source + score)
 CREATE TABLE IF NOT EXISTS post_techniques (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     raw_post_id     INTEGER NOT NULL,
@@ -199,6 +163,7 @@ CREATE INDEX IF NOT EXISTS idx_pt_post   ON post_techniques(raw_post_id);
 CREATE INDEX IF NOT EXISTS idx_pt_tech   ON post_techniques(technique_id);
 CREATE INDEX IF NOT EXISTS idx_pt_source ON post_techniques(source);
 
+-- One row per MITRE matching run
 CREATE TABLE IF NOT EXISTS mitre_runs (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at          REAL    NOT NULL,
@@ -210,18 +175,9 @@ CREATE TABLE IF NOT EXISTS mitre_runs (
     error               TEXT
 );
 
--- MITRE ATT&CK mitigations (defensive recommendations).
---
--- The same Enterprise ATT&CK STIX file we already parse for techniques also
--- contains 'course-of-action' objects (the official mitigations, Mxxxx codes)
--- and 'relationship' objects of type 'mitigates' linking a course-of-action to
--- an attack-pattern. We parse those here so every technique on a post can carry
--- MITRE's own recommended countermeasures — no LLM, no guessing, pure lookup.
---
--- mitre_mitigations:     one row per Enterprise mitigation (Mxxxx).
--- technique_mitigations: join table, one row per (technique, mitigation) edge.
---                        Idempotent re-ingest via UNIQUE(technique_id, mitigation_id).
+-- MITRE mitigations (Mxxxx) and which techniques each one mitigates.
 
+-- Official MITRE mitigations (defences)
 CREATE TABLE IF NOT EXISTS mitre_mitigations (
     mitigation_id   TEXT    PRIMARY KEY,
     name            TEXT    NOT NULL,
@@ -230,6 +186,7 @@ CREATE TABLE IF NOT EXISTS mitre_mitigations (
     ingested_at     REAL    NOT NULL
 );
 
+-- Which mitigation helps against which technique
 CREATE TABLE IF NOT EXISTS technique_mitigations (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     technique_id    TEXT    NOT NULL,
@@ -243,23 +200,9 @@ CREATE TABLE IF NOT EXISTS technique_mitigations (
 CREATE INDEX IF NOT EXISTS idx_tm_technique  ON technique_mitigations(technique_id);
 CREATE INDEX IF NOT EXISTS idx_tm_mitigation ON technique_mitigations(mitigation_id);
 
--- Investigations layer.
---
--- An investigation is a named, replayable view: a saved filter over the corpus
--- plus an optional cross-post LLM summary written through one of four "lenses"
--- (threat_intel / ransomware / personal_identity / corporate_espionage). The
--- filter is stored as JSON and re-evaluated on every read, so investigations
--- stay in sync as new posts arrive — they aren't frozen snapshots.
---
--- A rerun re-evaluates the filter, picks the matching post bodies + their
--- enrichment, and asks the LLM to write a single fused summary under the
--- chosen lens. The result is stored on the investigation row; reruns
--- overwrite. We don't keep history (no `investigation_summaries` table)
--- because storage cost > evidence value for a learning project.
---
--- Lens names live in code (backend/llm/lenses.py), not in the DB, so we can
--- evolve prompts without a migration. We just store the lens name string.
+-- Investigations: saved filter (re-run on every read) + optional LLM lens summary.
 
+-- Saved investigations: name, filters (JSON), lens, latest LLM summary
 CREATE TABLE IF NOT EXISTS investigations (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     name            TEXT    NOT NULL,
@@ -276,18 +219,9 @@ CREATE TABLE IF NOT EXISTS investigations (
 
 CREATE INDEX IF NOT EXISTS idx_investigations_created ON investigations(created_at DESC);
 
--- On-demand pipeline jobs.
---
--- A pipeline job is one end-to-end run triggered from the UI by pasting an
--- .onion URL: scrape (HTML) -> extract -> LLM -> MITRE -> mitigations. The job
--- runs in a background thread; this row is its live status, polled by the
--- frontend. `stage` is the human-readable current step; `status` is the
--- lifecycle state (queued | running | done | error). Counts accumulate as
--- stages complete so the UI can show progress without parsing logs.
---
--- This is observability state, not pipeline data — the actual posts/iocs/etc.
--- land in their normal tables, tagged with the job's `source`.
+-- Pipeline jobs started from the UI (Scout); live status polled by the frontend.
 
+-- Scrape jobs: live status, current stage, counts, and errors
 CREATE TABLE IF NOT EXISTS pipeline_jobs (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     onion_url       TEXT    NOT NULL,
@@ -309,15 +243,9 @@ CREATE TABLE IF NOT EXISTS pipeline_jobs (
 CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_created ON pipeline_jobs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_status  ON pipeline_jobs(status);
 
--- Watchlists + alerts.
---
--- A watchlist is a named set of terms an analyst cares about (their company,
--- domains, product names, a wallet). Every post that mentions any term becomes
--- a watch_hit, i.e. an alert. Matching uses the posts_fts full-text index with
--- exact-phrase queries and is incremental: `last_post_id` is a per-watchlist
--- cursor, so each check only scans posts ingested since the previous one.
--- UNIQUE(watchlist_id, raw_post_id) makes re-checking idempotent.
+-- Watchlists (saved terms) and watch_hits (posts that mention them = alerts).
 
+-- Watchlists: a name + list of terms; last_post_id = how far we've checked
 CREATE TABLE IF NOT EXISTS watchlists (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     name            TEXT    NOT NULL,
@@ -326,6 +254,7 @@ CREATE TABLE IF NOT EXISTS watchlists (
     last_post_id    INTEGER NOT NULL DEFAULT 0
 );
 
+-- Alerts: a post that mentions a watchlist term (seen = 0 means new)
 CREATE TABLE IF NOT EXISTS watch_hits (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     watchlist_id    INTEGER NOT NULL,

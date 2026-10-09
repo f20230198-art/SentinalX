@@ -1,13 +1,4 @@
-"""Four-stage prompt chain orchestrator.
-
-For each post:
-  1. summary    (free text)
-  2. intent     (JSON: {intent, confidence, reason})
-  3. targets    (JSON: {industries, geographies, victim_types})
-  4. techniques (JSON: {techniques, behaviour})
-
-Returns an Analysis dataclass; persistence is the caller's job.
-"""
+"""Runs the 4 LLM prompts per post: summary, intent, targets, techniques."""
 
 from __future__ import annotations
 
@@ -30,12 +21,12 @@ from backend.llm.prompts import (
 log = logging.getLogger("sentinelx.llm.chain")
 
 
-# Mistral with format=json sometimes wraps JSON in ```json fences or adds a
-# trailing apology. This pulls the first {...} block from the response.
+# Grabs the {...} JSON when the model wraps it in extra text
 _JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
 def _extract_json(text: str) -> dict | None:
+    # Empty reply -> nothing to parse
     text = text.strip()
     if not text:
         return None
@@ -65,8 +56,7 @@ class Analysis:
 
     @property
     def ok(self) -> bool:
-        # Summary is the cheapest signal that the model is responding at all.
-        # Intent is the only one we strictly need for downstream filtering.
+        # Need at least summary + intent for the analysis to count
         return self.summary is not None and self.intent is not None
 
 
@@ -78,6 +68,7 @@ def analyse_post(
     iocs: list[dict],
     entities: list[dict],
 ) -> Analysis:
+    # Run the 4 prompts one after another; a failure in one doesn't stop the others
     out = Analysis()
 
     # 1. summary
@@ -116,20 +107,13 @@ def analyse_post(
     except Exception as e:
         out.errors.append(f"techniques: {e!r}")
 
+    # Return everything we got (errors are listed in out.errors)
     return out
 
 
-# --- async variant ---------------------------------------------------------- #
-#
-# All four prompts are independent — none of them needs the output of another.
-# So we can fire them concurrently against the same loaded model. Ollama
-# happily interleaves requests sharing one model in VRAM (it queues kernel
-# launches on the GPU). Real wall-clock benefit comes from overlapping the
-# prompt-eval phase of one call with the token-generation of another.
-#
-# The schema for each prompt — system text, user text, json_mode, num_predict —
-# is the same as the sync path. We just await all four together.
+# The 4 prompts don't depend on each other, so run them in parallel
 
+# (name, prompt builder, wants JSON?, max tokens to generate) for each prompt
 _PROMPT_SPECS = (
     ("summary",    prompt_summary,    False, 400),
     ("intent",     prompt_intent,     True,  200),
@@ -150,6 +134,7 @@ async def _run_one(
     iocs: list[dict],
     entities: list[dict],
 ):
+    # Build the prompt, call the LLM, and return (name, reply, error)
     sys_p, usr_p, _ = builder(thread_title, category, body, iocs, entities)
     try:
         g = await client.generate(
@@ -168,8 +153,10 @@ async def analyse_post_async(
     iocs: list[dict],
     entities: list[dict],
 ) -> Analysis:
+    # Same as analyse_post, but all 4 prompts run at the same time
     out = Analysis()
 
+    # Start all 4 LLM calls together and wait for all of them
     tasks = [
         _run_one(client, name, builder, json_mode, num_predict,
                  thread_title, category, body, iocs, entities)
@@ -177,6 +164,7 @@ async def analyse_post_async(
     ]
     results = await asyncio.gather(*tasks)
 
+    # Put each reply in the right field (summary is plain text, the rest is JSON)
     for name, gen, err in results:
         if err is not None:
             out.errors.append(f"{name}: {err}")
@@ -191,13 +179,8 @@ async def analyse_post_async(
 
 
 def _apply_json(out: Analysis, name: str, text: str) -> None:
-    """Parse + schema-validate one JSON-mode response onto `out`.
-
-    Parsing alone isn't enough: valid JSON can still have the wrong keys,
-    an intent outside our label set, or a shape a prompt-injected post asked
-    for. Anything that fails validation is stored as None with an error, so
-    downstream stages never see unvalidated model output.
-    """
+    """Parse + validate one JSON reply; invalid output is stored as None with an error."""
+    # Pull the JSON out of the reply and check it matches the expected shape
     clean, err = schemas.validate(name, _extract_json(text))
     setattr(out, name, clean)
     if err:

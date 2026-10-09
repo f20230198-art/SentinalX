@@ -4,6 +4,7 @@ import { api } from "../lib/api";
 
 /** Header link to Alerts; shows the unseen count when there is one. */
 export function AlertBadge() {
+  // Re-check unseen alerts every 20 seconds
   const q = useQuery({ queryKey: ["alerts", null], queryFn: () => api.alerts(), refetchInterval: 20_000 });
   const n = q.data?.unseen ?? 0;
   return (

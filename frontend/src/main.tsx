@@ -9,6 +9,7 @@ import "./index.css";
 // Side-effect import: initialises i18next before any component renders.
 import "./i18n";
 
+// Shared data-fetching cache: data counts as fresh for 30s, retry a failed request once
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
@@ -19,6 +20,7 @@ const queryClient = new QueryClient({
   },
 });
 
+// Mount the app into <div id="root"> with the data cache and the router around it
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
