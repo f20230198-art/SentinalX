@@ -5,6 +5,7 @@
 # out. Scrape jobs need the full pipeline and are a local-laptop feature.
 
 httpx[socks]==0.27.2
+beautifulsoup4==4.12.3
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 pydantic>=2,<3
